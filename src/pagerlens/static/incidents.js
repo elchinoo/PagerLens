@@ -1,0 +1,174 @@
+import { api } from "/static/api.js";
+import { LABELS, lineChart } from "/static/charts.js";
+import { renderMarkdown } from "/static/markdown.js";
+import { $, fill, h, setBusy, toast } from "/static/ui.js";
+
+const CATEGORY_NAMES = {
+  bad_deploy: "Bad deploy", db_saturation: "Database saturation", resource_exhaustion: "Resource exhaustion",
+  dependency_outage: "Dependency outage", traffic_spike: "Traffic spike", expired_certificate: "Expired certificate",
+};
+const when = (s) => (s ? new Date(s).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "");
+const sevClass = (s) => `badge sev ${s}`;
+
+export async function initIncidents(id) {
+  const box = $("view-incidents");
+  if (id) return renderDetail(box, id);
+  return renderList(box);
+}
+
+async function renderList(box) {
+  fill(box, h("p", { class: "loading" }, "Loading incidents…"));
+  let data;
+  try { data = await api("/api/incidents"); } catch (err) { fill(box, h("p", { class: "error" }, err.message)); return; }
+  const rows = data.incidents;
+  fill(box,
+    h("div", { class: "row" }, h("h1", {}, "Incidents"),
+      h("a", { class: "button-link", href: "#lab" }, "Break something in the Lab")),
+    rows.length ? h("div", { class: "card flush" }, h("table", {},
+      h("thead", {}, h("tr", {}, ...["", "Incident", "Service", "Status", "Likely cause", "Detected"].map((t) => h("th", {}, t)))),
+      h("tbody", {}, ...rows.map((r) => h("tr", { class: "clickable", tabindex: "0", onclick: () => { location.hash = `#incidents/${r.id}`; },
+        onkeydown: (e) => { if (e.key === "Enter") location.hash = `#incidents/${r.id}`; } },
+        h("td", {}, h("span", { class: sevClass(r.severity) }, r.severity)),
+        h("td", { class: "title" }, h("a", { href: `#incidents/${r.id}` }, r.title)),
+        h("td", {}, r.service),
+        h("td", {}, h("span", { class: `badge status ${r.status}` }, r.status)),
+        h("td", {}, r.root_cause_category ? `Resolved: ${CATEGORY_NAMES[r.root_cause_category] || r.root_cause_category}` : (r.top_hypothesis || h("span", { class: "muted" }, "not investigated"))),
+        h("td", {}, when(r.detected_at))))))) :
+      h("div", { class: "card empty" }, h("p", {}, "No incidents yet."),
+        h("p", { class: "muted" }, "Open the Lab to break the demo shop, or send an alert to the webhook (see Fleet)."),
+        h("a", { class: "button-link", href: "#lab" }, "Go to the Lab")));
+}
+
+async function renderDetail(box, id) {
+  fill(box, h("p", { class: "loading" }, "Loading…"));
+  let inc;
+  try { inc = await api(`/api/incidents/${id}`); } catch (err) {
+    fill(box, h("a", { href: "#incidents" }, "← Incidents"), h("p", { class: "error" }, err.message)); return;
+  }
+  const reload = () => renderDetail(box, id);
+  const memory = h("input", { id: "use-memory", type: "checkbox", checked: true });
+  const go = h("button", { class: "primary", type: "button", onclick: async () => {
+    setBusy(go, true, "Investigating…");
+    try { await api(`/api/incidents/${id}/investigate`, { method: "POST", json: { mode: "rules", use_memory: memory.checked } }); toast("Investigation finished"); reload(); }
+    catch (err) { toast(err.message, true); setBusy(go, false); }
+  } }, inc.runs.length ? "Investigate again" : "Investigate");
+
+  const header = h("div", { class: "detail-head" },
+    h("a", { href: "#incidents" }, "← Incidents"),
+    h("div", { class: "row" }, h("h1", {}, inc.title),
+      h("span", { class: "badges" }, h("span", { class: sevClass(inc.severity) }, inc.severity), h("span", { class: `badge status ${inc.status}` }, inc.status))),
+    h("p", { class: "muted" }, `${inc.service} · detected ${when(inc.detected_at)} · ${inc.symptom}`),
+    inc.status === "resolved" ? h("div", { class: "banner ok" }, `Resolved as ${CATEGORY_NAMES[inc.root_cause_category] || inc.root_cause_category}${inc.root_cause_note ? ": " + inc.root_cause_note : ""}. This incident is now memory for future investigations.`) : null,
+    h("div", { class: "btns wrap" }, go,
+      h("label", { class: "check inline", for: "use-memory" }, memory, " Use memory of resolved incidents")));
+
+  const sections = [header, hypothesesSection(inc), h("div", { id: "charts-host" }), reportSection(inc), runSection(inc), resolveSection(inc, reload), notesSection(inc, reload)];
+  fill(box, ...sections);
+  loadCharts(id, inc.service);
+}
+
+function hypothesesSection(inc) {
+  if (!inc.hypotheses.length) {
+    return h("section", { class: "card" }, h("h2", {}, "Hypotheses"), h("p", { class: "muted" }, "Press Investigate: PagerLens will gather read-only evidence, rank the possible causes and write a report. Nothing in your systems is changed."));
+  }
+  const obsHost = h("div", { class: "obs-host" });
+  const cards = inc.hypotheses.map((hy) => h("article", { class: "hyp" },
+    h("div", { class: "row" },
+      h("h3", {}, `${hy.rank}. ${hy.title}`),
+      h("span", { class: "badges" }, h("span", { class: "badge alt" }, CATEGORY_NAMES[hy.category] || hy.category), h("span", { class: "badge plain" }, `${Math.round(hy.score * 100)}%`))),
+    h("progress", { max: "1", value: String(hy.score), "aria-label": "confidence" }),
+    h("ul", { class: "evidence" }, ...hy.evidence.map((e) => h("li", { class: e.stance },
+      h("span", { class: `stance ${e.stance}` }, e.stance === "supports" ? "supports" : "refutes"), " ", e.note, " ",
+      h("button", { class: "linklike", type: "button", onclick: () => showObservation(obsHost, e.observation_id) }, `evidence #${e.observation_id}`))))));
+  return h("section", { class: "card" }, h("h2", {}, "Hypotheses"),
+    h("p", { class: "muted" }, "Each hypothesis cites observations that support or refute it. Click an evidence link to see the raw data behind it."), ...cards, obsHost);
+}
+
+async function showObservation(host, id) {
+  try {
+    const o = await api(`/api/observations/${id}`);
+    fill(host, h("div", { class: "obs" }, h("div", { class: "row" }, h("strong", {}, `Observation #${o.id}: ${o.source}`),
+      h("button", { class: "ghost small", type: "button", onclick: () => fill(host) }, "Close")),
+      h("p", { class: "muted" }, `${o.summary} · digest ${o.digest}`),
+      h("p", { class: "hint" }, "Log text below is untrusted data collected from your services."),
+      h("pre", { class: "code" }, h("code", {}, JSON.stringify(o.payload, null, 2)))));
+    host.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  } catch (err) { toast(err.message, true); }
+}
+
+function reportSection(inc) {
+  if (!inc.report) return null;
+  return h("section", { class: "card" }, h("div", { class: "row" }, h("h2", {}, "Report"),
+    h("button", { class: "secondary small", type: "button", onclick: async () => { try { await navigator.clipboard.writeText(inc.report.markdown); toast("Report copied as Markdown"); } catch { toast("Copy failed", true); } } }, "Copy Markdown")),
+    renderMarkdown(inc.report.markdown.replace(/^# .*\n+/, "")));
+}
+
+function runSection(inc) {
+  if (!inc.runs.length) return null;
+  const host = h("div", {});
+  const load = async (runId) => {
+    const run = await api(`/api/runs/${runId}`);
+    fill(host, h("div", { class: "card flush" }, h("table", {},
+      h("thead", {}, h("tr", {}, ...["#", "Step", "What it found", "Rows", "ms"].map((t) => h("th", {}, t)))),
+      h("tbody", {}, ...run.steps.map((s) => h("tr", {}, h("td", {}, s.ord), h("td", {}, h("code", {}, s.tool || s.kind), s.args && s.args.service ? ` ${s.args.service}` : ""),
+        h("td", {}, s.summary), h("td", { class: "num" }, s.row_count ?? ""), h("td", { class: "num" }, s.ms ?? "")))))));
+  };
+  const select = h("select", { "aria-label": "Run", onchange: (e) => load(e.target.value) },
+    ...inc.runs.map((r) => h("option", { value: String(r.id) }, `Run #${r.id} · ${r.mode}${r.use_memory ? " + memory" : ""} · ${r.status} · ${when(r.started_at)}${r.usage && r.usage.tool_calls ? ` · ${r.usage.tool_calls} tool calls` : ""}`)));
+  load(inc.runs[0].id).catch((err) => toast(err.message, true));
+  return h("section", { class: "card" }, h("h2", {}, "Run viewer"),
+    h("p", { class: "muted" }, "Every step the investigator took, in order. Tools are read-only and capped; a run has a fixed tool-call budget."), select, host);
+}
+
+function resolveSection(inc, reload) {
+  if (inc.status === "resolved") {
+    const truth = h("div", {});
+    return h("section", { class: "card" }, h("h2", {}, "Learning check"),
+      h("p", { class: "muted" }, "Simulated incidents have a known answer. Reveal it to see whether the investigation got it right."),
+      h("button", { class: "secondary small", type: "button", onclick: async () => {
+        const r = await api(`/api/incidents/${inc.id}/truth`);
+        fill(truth, r.truth ? h("p", {}, `Simulated scenario: `, h("strong", {}, r.truth.scenario), ` (true cause: ${CATEGORY_NAMES[r.truth.category] || r.truth.category}). Top hypothesis was ${inc.hypotheses[0] ? CATEGORY_NAMES[inc.hypotheses[0].category] || inc.hypotheses[0].category : "none"}.`) : h("p", { class: "muted" }, "This is not a simulated incident, so there is no recorded answer."));
+      } }, "Reveal simulated answer"), truth);
+  }
+  const cat = h("select", { id: "rc-cat" }, ...Object.entries(CATEGORY_NAMES).map(([k, v]) => h("option", { value: k }, v)));
+  const note = h("input", { id: "rc-note", maxlength: "1000", placeholder: "What actually happened? (optional)" });
+  const top = inc.hypotheses[0];
+  if (top && CATEGORY_NAMES[top.category]) cat.value = top.category;
+  return h("section", { class: "card" }, h("h2", {}, "Close the loop"),
+    h("p", { class: "muted" }, "Record the real cause. The resolved incident is embedded and recalled when similar incidents happen, so investigations improve."),
+    h("div", { class: "grid-inline" },
+      h("div", { class: "field" }, h("label", { for: "rc-cat" }, "Real cause"), cat),
+      h("div", { class: "field" }, h("label", { for: "rc-note" }, "Note"), note),
+      h("button", { class: "primary", type: "button", onclick: async () => {
+        try { await api(`/api/incidents/${inc.id}/resolve`, { method: "POST", json: { category: cat.value, note: note.value || null } }); toast("Incident resolved and remembered"); reload(); }
+        catch (err) { toast(err.message, true); }
+      } }, "Mark resolved")));
+}
+
+function notesSection(inc, reload) {
+  const box = h("textarea", { id: "note-body", rows: "2", maxlength: "4000", placeholder: "Add a note for the team…" });
+  return h("section", { class: "card" }, h("h2", {}, "Notes"),
+    ...inc.notes.map((n) => h("p", { class: "note" }, h("strong", {}, `${n.author} `), h("span", { class: "muted" }, when(n.created_at)), h("br"), n.body)),
+    h("div", { class: "field" }, box),
+    h("button", { class: "secondary", type: "button", onclick: async () => {
+      if (!box.value.trim()) return;
+      try { await api(`/api/incidents/${inc.id}/notes`, { method: "POST", json: { body: box.value } }); reload(); } catch (err) { toast(err.message, true); }
+    } }, "Add note"));
+}
+
+async function loadCharts(id, service) {
+  const host = $("charts-host");
+  if (!host) return;
+  let t;
+  try { t = await api(`/api/incidents/${id}/telemetry`); } catch { return; }
+  const names = Object.keys(t.services);
+  const grid = h("div", { class: "charts" });
+  const select = h("select", { "aria-label": "Service", onchange: (e) => draw(e.target.value) }, ...names.map((n) => h("option", { value: n }, n === service ? `${n} (alerting)` : `${n} (dependency)`)));
+  function draw(name) {
+    const s = t.services[name];
+    fill(grid, ...Object.entries(s.metrics).map(([m, pts]) => h("figure", { class: "chartbox" }, h("figcaption", {}, LABELS[m] || m), lineChart(pts, { anchor: t.anchor, deploys: s.deploys, label: `${LABELS[m] || m} for ${name}` }))));
+  }
+  fill(host, h("section", { class: "card" }, h("div", { class: "row" }, h("h2", {}, "Telemetry"), select),
+    h("p", { class: "muted" }, "Last 90 minutes. Dashed line: alert fired. Dotted lines: deploys."), grid));
+  draw(service);
+}

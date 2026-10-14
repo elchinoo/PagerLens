@@ -1,0 +1,27 @@
+# LOCAL DEVELOPMENT ONLY. Set POSTGRES_PASSWORD in your git-ignored .env (see .env.example).
+# The database is bound to 127.0.0.1.
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: pagerlens
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: pagerlens
+    ports: ["127.0.0.1:5433:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pagerlens"]
+      interval: 3s
+      retries: 20
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://pagerlens:${POSTGRES_PASSWORD}@db:5432/pagerlens
+      AUTO_SEED: "true"
+      # First run prints a one-time setup code: see `docker compose logs api`.
+    ports: ["127.0.0.1:8001:8000"]
+    depends_on:
+      db: {condition: service_healthy}
+    command: pagerlens start
+volumes:
+  pgdata:

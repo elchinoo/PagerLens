@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PagerLens</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Investigate incidents from your own telemetry: evidence-backed hypotheses, runbooks and memory on Postgres and pgvector.">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#incidents"><img src="/static/logo.svg" alt="" width="34" height="34"><span>PagerLens</span></a>
+  <nav id="nav" class="tabs" hidden>
+    <a href="#incidents" data-tab="incidents">Incidents</a>
+    <a href="#fleet" data-tab="fleet">Fleet</a>
+    <a href="#lab" data-tab="lab">Lab</a>
+    <a href="#runbooks" data-tab="runbooks">Runbooks</a>
+    <a href="#settings" data-tab="settings">Settings</a>
+    <a href="#connect" data-tab="connect">Connect</a>
+  </nav>
+  <button id="signout" class="ghost" type="button" hidden>Sign out</button>
+</header>
+
+<main>
+  <section id="auth-card" class="card narrow" hidden></section>
+  <div id="vault-banner" class="banner vault" hidden></div>
+
+  <section id="view-incidents" hidden></section>
+  <section id="view-fleet" hidden></section>
+  <section id="view-lab" hidden></section>
+  <section id="view-runbooks" hidden></section>
+
+  <section id="view-settings" hidden>
+    <h1>Settings</h1>
+    <div id="settings-accounts"></div>
+    <div id="settings-security" class="settings-block"></div>
+  </section>
+
+  <section id="view-connect" hidden>
+    <h1>Connect an AI assistant</h1>
+    <p class="muted">PagerLens exposes incidents, hypotheses and runbooks as an MCP server, so tools like Claude Code, VS Code or Codex can ask "why is checkout failing?".</p>
+    <ol class="steps">
+      <li>Create a <strong>read-only API token</strong> under Settings, then API tokens. (Use a <em>full</em> token only if the assistant should run investigations and mark root causes.) Put it in the environment where the client runs:
+        <pre class="code"><code>export PAGERLENS_TOKEN=&lt;your token&gt;</code></pre></li>
+      <li>Pick your client and apply the configuration:
+        <div class="row left"><label for="client">Client</label><select id="client"></select></div>
+        <p id="client-where" class="muted"></p>
+        <div class="codewrap"><pre class="code"><code id="client-snippet"></code></pre><button id="copy-snippet" class="secondary small" type="button">Copy</button></div>
+      </li>
+      <li>Ask your assistant: <em>"Using pagerlens, what incidents are open and what is the most likely cause of the newest one?"</em></li>
+    </ol>
+    <p class="muted">Server URL: <code id="mcp-url"></code></p>
+  </section>
+</main>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<script src="/static/app.js" type="module"></script>
+</body>
+</html>
