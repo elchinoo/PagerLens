@@ -8,6 +8,7 @@ const CATEGORY_NAMES = {
   dependency_outage: "Dependency outage", traffic_spike: "Traffic spike", expired_certificate: "Expired certificate",
 };
 const when = (s) => (s ? new Date(s).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "");
+const SOURCE_NAMES = { rules: "rules", llm: "AI", both: "rules + AI" };
 const sevClass = (s) => `badge sev ${s}`;
 
 export async function initIncidents(id) {
@@ -47,10 +48,36 @@ async function renderDetail(box, id) {
   }
   const reload = () => renderDetail(box, id);
   const memory = h("input", { id: "use-memory", type: "checkbox", checked: true });
+  const mode = h("select", { id: "inv-mode", "aria-label": "Method" },
+    h("option", { value: "rules" }, "Rules (no AI, free)"),
+    h("option", { value: "hybrid" }, "Rules + AI (recommended)"),
+    h("option", { value: "llm" }, "AI only"));
+  try { const saved = localStorage.getItem("pagerlens.mode"); if (["rules", "hybrid", "llm"].includes(saved)) mode.value = saved; } catch { /* storage unavailable */ }
+  const acct = h("select", { id: "inv-account", "aria-label": "AI account", hidden: true });
+  const acctNote = h("p", { class: "hint", hidden: true }, "");
+  const syncMode = () => {
+    const ai = mode.value !== "rules";
+    acct.hidden = !ai;
+    acctNote.hidden = !ai;
+    acctNote.textContent = !ai ? "" : (acct.dataset.count === "0"
+      ? "No chat account yet. Add one under Settings (the key is stored encrypted)."
+      : "The AI uses read-only tools, cites evidence and is checked before it counts. It sends log excerpts to the provider and spends its credit.");
+  };
+  api("/api/accounts").then((a) => {
+    const usable = [...a.accounts, ...(a.env ? [a.env] : [])].filter((x) => x.chat_model);
+    for (const x of usable) acct.append(h("option", { value: String(x.id) }, `${x.name} · ${x.chat_model}`));
+    acct.dataset.count = String(usable.length);
+  }).catch(() => {}).finally(() => syncMode());
+  mode.addEventListener("change", () => { syncMode(); try { localStorage.setItem("pagerlens.mode", mode.value); } catch { /* ignore */ } });
   const go = h("button", { class: "primary", type: "button", onclick: async () => {
-    setBusy(go, true, "Investigating…");
-    try { await api(`/api/incidents/${id}/investigate`, { method: "POST", json: { mode: "rules", use_memory: memory.checked } }); toast("Investigation finished"); reload(); }
-    catch (err) { toast(err.message, true); setBusy(go, false); }
+    if (mode.value !== "rules" && !acct.value) { toast("Choose an AI account first (Settings > Add account).", true); return; }
+    setBusy(go, true, mode.value === "rules" ? "Investigating…" : "Investigating (the AI takes 10-60 s)…");
+    try {
+      const r = await api(`/api/incidents/${id}/investigate`, { method: "POST", json: { mode: mode.value, use_memory: memory.checked, account: mode.value === "rules" ? null : acct.value } });
+      const warn = r.runs[0] && r.runs[0].warning;
+      toast(warn ? `Finished with a warning: ${warn}` : "Investigation finished", Boolean(warn));
+      reload();
+    } catch (err) { toast(err.message, true); setBusy(go, false); }
   } }, inc.runs.length ? "Investigate again" : "Investigate");
 
   const header = h("div", { class: "detail-head" },
@@ -59,8 +86,10 @@ async function renderDetail(box, id) {
       h("span", { class: "badges" }, h("span", { class: sevClass(inc.severity) }, inc.severity), h("span", { class: `badge status ${inc.status}` }, inc.status))),
     h("p", { class: "muted" }, `${inc.service} · detected ${when(inc.detected_at)} · ${inc.symptom}`),
     inc.status === "resolved" ? h("div", { class: "banner ok" }, `Resolved as ${CATEGORY_NAMES[inc.root_cause_category] || inc.root_cause_category}${inc.root_cause_note ? ": " + inc.root_cause_note : ""}. This incident is now memory for future investigations.`) : null,
-    h("div", { class: "btns wrap" }, go,
-      h("label", { class: "check inline", for: "use-memory" }, memory, " Use memory of resolved incidents")));
+    h("div", { class: "btns wrap" }, h("label", { class: "sr", for: "inv-mode" }, "Method"), mode, acct, go,
+      h("label", { class: "check inline", for: "use-memory" }, memory, " Use memory of resolved incidents")),
+    acctNote,
+    inc.runs[0] && inc.runs[0].warning ? h("div", { class: "banner" }, `Last run: ${inc.runs[0].warning}`) : null);
 
   const sections = [header, hypothesesSection(inc), h("div", { id: "charts-host" }), reportSection(inc), runSection(inc), resolveSection(inc, reload), notesSection(inc, reload)];
   fill(box, ...sections);
@@ -75,7 +104,10 @@ function hypothesesSection(inc) {
   const cards = inc.hypotheses.map((hy) => h("article", { class: "hyp" },
     h("div", { class: "row" },
       h("h3", {}, `${hy.rank}. ${hy.title}`),
-      h("span", { class: "badges" }, h("span", { class: "badge alt" }, CATEGORY_NAMES[hy.category] || hy.category), h("span", { class: "badge plain" }, `${Math.round(hy.score * 100)}%`))),
+      h("span", { class: "badges" }, h("span", { class: `badge src ${hy.source}` }, SOURCE_NAMES[hy.source] || hy.source),
+        h("span", { class: "badge alt" }, CATEGORY_NAMES[hy.category] || hy.category), h("span", { class: "badge plain" }, `${Math.round(hy.score * 100)}%`))),
+    hy.source === "both" || hy.rules_score != null && hy.llm_score != null ? h("p", { class: "hint" }, `Rules ${Math.round(hy.rules_score * 100)}% · AI ${Math.round(hy.llm_score * 100)}% (agreement adds confidence)`) : null,
+    hy.source === "llm" && hy.grounded === false ? h("p", { class: "warn-text" }, "Ungrounded: the AI cited no evidence that exists, so this is heavily discounted.") : null,
     h("progress", { max: "1", value: String(hy.score), "aria-label": "confidence" }),
     h("ul", { class: "evidence" }, ...hy.evidence.map((e) => h("li", { class: e.stance },
       h("span", { class: `stance ${e.stance}` }, e.stance === "supports" ? "supports" : "refutes"), " ", e.note, " ",
@@ -110,11 +142,11 @@ function runSection(inc) {
     const run = await api(`/api/runs/${runId}`);
     fill(host, h("div", { class: "card flush" }, h("table", {},
       h("thead", {}, h("tr", {}, ...["#", "Step", "What it found", "Rows", "ms"].map((t) => h("th", {}, t)))),
-      h("tbody", {}, ...run.steps.map((s) => h("tr", {}, h("td", {}, s.ord), h("td", {}, h("code", {}, s.tool || s.kind), s.args && s.args.service ? ` ${s.args.service}` : ""),
+      h("tbody", {}, ...run.steps.map((s) => h("tr", {}, h("td", {}, s.ord), h("td", {}, h("code", {}, s.tool || (s.kind === "llm" ? "AI turn" : s.kind)), s.args && s.args.service ? ` ${s.args.service}` : ""),
         h("td", {}, s.summary), h("td", { class: "num" }, s.row_count ?? ""), h("td", { class: "num" }, s.ms ?? "")))))));
   };
   const select = h("select", { "aria-label": "Run", onchange: (e) => load(e.target.value) },
-    ...inc.runs.map((r) => h("option", { value: String(r.id) }, `Run #${r.id} · ${r.mode}${r.use_memory ? " + memory" : ""} · ${r.status} · ${when(r.started_at)}${r.usage && r.usage.tool_calls ? ` · ${r.usage.tool_calls} tool calls` : ""}`)));
+    ...inc.runs.map((r) => h("option", { value: String(r.id) }, `Run #${r.id} · ${r.mode}${r.use_memory ? " + memory" : ""} · ${r.status} · ${when(r.started_at)}${r.usage && r.usage.tool_calls ? ` · ${r.usage.tool_calls} tool calls` : ""}${r.usage && r.usage.llm_calls ? ` · ${r.usage.llm_calls} AI calls, ${(r.usage.prompt_tokens || 0) + (r.usage.completion_tokens || 0)} tokens` : ""}`)));
   load(inc.runs[0].id).catch((err) => toast(err.message, true));
   return h("section", { class: "card" }, h("h2", {}, "Run viewer"),
     h("p", { class: "muted" }, "Every step the investigator took, in order. Tools are read-only and capped; a run has a fixed tool-call budget."), select, host);

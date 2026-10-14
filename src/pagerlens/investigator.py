@@ -1,78 +1,32 @@
-"""The investigation loop (rules mode): bounded, read-only, evidence-linked and fully recorded.
+"""The investigation loop: rules, LLM or both, always bounded, read-only, evidence-linked and fully recorded.
 
-Collect evidence with the read-only tools -> propose hypotheses, each tied to observations that support or refute
-it -> run refuting checks -> apply the memory prior from similar resolved incidents -> write a report.
+rules : collect evidence with the read-only tools -> score six failure patterns, each tied to observations that
+        support or refute it -> refuting checks -> memory prior from similar resolved incidents.
+llm   : a model drives the same read-only tools in a bounded loop; its answer is validated before it is used.
+hybrid: rules first, then the model investigates the same incident (and may cite the rules' observations); the two
+        sets of hypotheses are reconciled, agreement is rewarded and disagreement is shown.
+
 Nothing here changes any monitored system; the only writes are PagerLens' own run/evidence/report tables.
 """
-import hashlib
 import json
 import re
-import time
 from datetime import datetime, timedelta
 
-from . import retrieval, tools
+from . import llm_agent, retrieval, tools
+from .accounts import ChatConfig
+from .investigator_core import CATEGORIES, MAX_TOOL_CALLS, Budget, Recorder, call_tool
+from .llm_http import LLMError
 from .tools import Ctx, ToolError
 
-MAX_TOOL_CALLS = 30
-CATEGORIES = {
-    "bad_deploy": "A recent deploy introduced the failure",
-    "db_saturation": "Database connection pool or database saturation",
-    "resource_exhaustion": "A service is running out of memory or other resources",
-    "dependency_outage": "A dependency the service relies on is failing",
-    "traffic_spike": "Traffic surged beyond capacity",
-    "expired_certificate": "A TLS certificate expired or is invalid",
-    "unknown": "Not enough evidence",
-}
+MAX_LLM_TOOL_CALLS = 12
+MODES = ("rules", "llm", "hybrid")
+__all__ = ["CATEGORIES", "MAX_TOOL_CALLS", "MODES", "Budget", "Recorder", "ToolError", "call_tool", "investigate"]
+
 _POOL = re.compile(r"pool|too many connections|timeout acquiring connection|connection.*exhaust", re.I)
 _OOM = re.compile(r"OutOfMemory|OOMKilled|heap space|out of memory", re.I)
 _CERT = re.compile(r"x509|certificate (has )?expired|certificate verify|tls handshake|ssl.*(expired|verify)", re.I)
 _QUEUE = re.compile(r"queue depth|backlog|rate limit", re.I)
 _TIMEOUT = re.compile(r"timeout|timed out|unavailable|connection refused|upstream", re.I)
-
-
-class Budget:
-    def __init__(self, max_calls: int | None = None):
-        self.max_calls, self.calls, self.ms = max_calls or MAX_TOOL_CALLS, 0, 0
-
-    def spend(self) -> None:
-        if self.calls >= self.max_calls:
-            raise ToolError(f"tool-call budget of {self.max_calls} exhausted")
-        self.calls += 1
-
-
-class Recorder:
-    """Writes every step and observation as it happens, so a run can be replayed and audited."""
-
-    def __init__(self, conn, run_id: int, incident_id: int):
-        self.conn, self.run_id, self.incident_id, self.ord = conn, run_id, incident_id, 0
-
-    def step(self, kind: str, tool: str | None, args: dict, summary: str, rows: int | None, ms: int | None) -> int:
-        self.ord += 1
-        return self.conn.execute(
-            "INSERT INTO run_step (run_id, ord, kind, tool, args, summary, row_count, ms) VALUES (%s,%s,%s,%s,%s::jsonb,%s,%s,%s) "
-            "RETURNING id", (self.run_id, self.ord, kind, tool, json.dumps(args), summary[:500], rows, ms)).fetchone()["id"]
-
-    def observe(self, step_id: int | None, source: str, kind: str, summary: str, payload: dict) -> int:
-        body = json.dumps(payload, default=str, sort_keys=True)
-        return self.conn.execute(
-            "INSERT INTO observation (incident_id, run_id, step_id, source, kind, summary, payload, digest) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb,%s) RETURNING id",
-            (self.incident_id, self.run_id, step_id, source, kind, summary[:500], body,
-             hashlib.sha256(body.encode()).hexdigest()[:16])).fetchone()["id"]
-
-
-def call_tool(ctx: Ctx, rec: Recorder, budget: Budget, name: str, **args) -> tuple[tools.ToolResult, int]:
-    """Run one registered read-only tool, recording the step and its observation."""
-    if name not in tools.REGISTRY:
-        raise ToolError(f"unknown tool {name!r}")
-    budget.spend()
-    started = time.monotonic()
-    result = tools.REGISTRY[name][0](ctx, **args)
-    ms = int((time.monotonic() - started) * 1000)
-    budget.ms += ms
-    step_id = rec.step("tool", name, args, result.summary, result.rows, ms)
-    obs_id = rec.observe(step_id, name, name, result.summary, result.data)
-    return result, obs_id
 
 
 def _dt(value: str | None) -> datetime | None:
@@ -219,33 +173,147 @@ def _hypotheses(S: str, targets: list[str], M: dict, SIG: dict, DEP: dict, onset
     return out
 
 
-def _timeline(S, targets, DEP, SIG, onset, anchor) -> list[dict]:
-    events = []
+
+
+class RulesResult:
+    def __init__(self, hyps, targets, SIG, similar, unrelated):
+        self.hyps, self.targets, self.SIG, self.similar, self.unrelated = hyps, targets, SIG, similar, unrelated
+
+
+def _rules_phase(ctx: Ctx, rec: Recorder, budget: Budget, use_memory: bool) -> RulesResult:
+    S = ctx.service
+    overview, _ = call_tool(ctx, rec, budget, "service_overview", service=S)
+    targets = [S] + overview.data["depends_on"]
+    M, SIG, DEP = {}, {}, {}
     for svc in targets:
-        for d in DEP[svc][0]["deploys"]:
-            events.append({"ts": d["deployed_at"], "text": f"deploy {svc} {d['version']}" + (f" by {d['author']}" if d.get("author") else "")})
-        for s in SIG[svc][0]["signatures"][:2]:
-            if s["new"]:
-                events.append({"ts": s["first_seen"], "text": f"first '{s['signature'][:70]}' on {svc} ({s['count']} in window)"})
-    if onset:
-        events.append({"ts": onset.isoformat(), "text": "first metric anomaly"})
-    events.append({"ts": anchor.isoformat(), "text": "alert fired, incident opened"})
-    return sorted(events, key=lambda e: e["ts"])
+        r, o = call_tool(ctx, rec, budget, "metrics_overview", service=svc)
+        M[svc] = (r.data, o)
+        r, o = call_tool(ctx, rec, budget, "error_signatures", service=svc)
+        SIG[svc] = (r.data, o)
+        r, o = call_tool(ctx, rec, budget, "recent_deploys", service=svc)
+        DEP[svc] = (r.data, o)
+    # refuting check: are other services' deploys the real story? (read-only, bounded)
+    unrelated = []
+    for other in [r["name"] for r in ctx.conn.execute("SELECT name FROM service ORDER BY name")]:
+        if other in targets or len(unrelated) >= 5:
+            continue
+        r, _ = call_tool(ctx, rec, budget, "recent_deploys", service=other, since_minutes=60)
+        unrelated += [f"{other} {d['version']} ({d['minutes_before_alert']:.0f} min before the alert): not a dependency of {S}"
+                      for d in r.data["deploys"]]
+    anomalies = sorted(_dt(d["first_anomaly"]) for d, _ in M.values() if d.get("first_anomaly"))
+    onset = anomalies[0] if anomalies else None
+    hyps = _hypotheses(S, targets, M, SIG, DEP, onset)
+    similar: list[dict] = []
+    if use_memory:
+        top_sigs = [s["signature"] for svc in targets for s in SIG[svc][0]["signatures"][:2]]
+        r, sim_obs = call_tool(ctx, rec, budget, "find_similar_incidents",
+                               text=f"{S}: {ctx.symptom} | " + " | ".join(top_sigs[:6]))
+        similar = r.data["incidents"]
+        for h in hyps:
+            match = [s for s in similar if s["root_cause_category"] == h.category and s["similarity"] >= 0.3]
+            if match:
+                best = max(s["similarity"] for s in match)
+                h.support(sim_obs, min(0.2, 0.25 * best),
+                          f"{len(match)} similar past incident(s) were resolved as {h.category} (best similarity {best:.2f})")
+    for h in hyps:
+        h.score = max(0.01, min(0.99, h.score))
+    hyps.sort(key=lambda h: h.score, reverse=True)
+    return RulesResult(hyps, targets, SIG, similar, unrelated)
 
 
-def _report(incident, S, hyps, timeline, runbooks, similar, unrelated, calls) -> str:
+def _combine(mode: str, rules: RulesResult | None, agent: llm_agent.AgentResult | None, S: str) -> list[dict]:
+    """Reconcile the two methods. Both agreeing is the strongest signal; a lone rules hit is discounted because the
+    model did not corroborate it; a lone model claim counts for little unless it cites real evidence."""
+    entries: list[dict] = []
+    for h in (rules.hyps if rules else []):
+        entries.append({"category": h.category, "suspect": h.suspect, "title": h.title,
+                        "explanation": "; ".join(h.notes) if h.notes else h.title, "rules": h.score, "llm": None,
+                        "grounded": None, "evidence": list(h.evidence), "source": "rules"})
+    for a in (agent.hypotheses if agent else []):
+        match = next((e for e in entries if e["category"] == a["category"] and e["llm"] is None and e["source"] != "llm"
+                      and (not a["suspect"] or not e["suspect"] or a["suspect"] == e["suspect"])), None)
+        ev = [(i, "supports", f"cited by the AI: {a['explanation'][:160] or a['title']}") for i in a["supports"]] + \
+             [(i, "refutes", f"cited by the AI: {a['explanation'][:160] or a['title']}") for i in a["refutes"]]
+        if match:
+            match.update(llm=a["confidence"], grounded=a["grounded"], source="both",
+                         explanation=f"{match['explanation']} | AI: {a['explanation']}" if a["explanation"] else match["explanation"])
+            match["evidence"] += ev
+        else:
+            prefix = "AI only, no rule matched" if a["grounded"] else "AI only and UNGROUNDED (it cited no real evidence)"
+            entries.append({"category": a["category"], "suspect": a["suspect"], "title": a["title"],
+                            "explanation": f"{prefix}: {a['explanation']}", "rules": None, "llm": a["confidence"],
+                            "grounded": a["grounded"], "evidence": ev, "source": "llm"})
+    for e in entries:
+        r, ai, g = e["rules"], e["llm"], e["grounded"]
+        if mode == "rules":
+            score = r
+        elif e["source"] == "both":
+            score = min(0.99, 0.5 * r + 0.5 * ai + 0.1)
+        elif e["source"] == "rules":
+            score = 0.85 * r if agent else r
+        else:
+            score = (0.5 if g else 0.2) * ai
+        e["score"] = max(0.01, min(0.99, score))
+    entries.sort(key=lambda e: e["score"], reverse=True)
+    if not entries:
+        entries.append({"category": "unknown", "suspect": S, "title": "No known failure pattern matches the evidence",
+                        "explanation": "The checks did not match a known pattern; review the error signatures and metrics manually.",
+                        "rules": 0.05, "llm": None, "grounded": None, "score": 0.05, "evidence": [], "source": "rules"})
+    return entries
+
+
+def _timeline(conn, run_id: int, anchor: datetime) -> list[dict]:
+    """Built from the run's own observations, so rules, LLM and hybrid runs all get one."""
+    events, anomalies = {}, []
+    for o in conn.execute("SELECT source, payload FROM observation WHERE run_id=%s ORDER BY id", (run_id,)):
+        p = o["payload"]
+        if o["source"] == "recent_deploys":
+            for d in p.get("deploys", []):
+                events[(d["deployed_at"], "d", p["service"])] = f"deploy {p['service']} {d['version']}" + (f" by {d['author']}" if d.get("author") else "")
+        elif o["source"] == "error_signatures":
+            for s in p.get("signatures", [])[:2]:
+                if s["new"]:
+                    events[(s["first_seen"], "s", p["service"])] = f"first '{s['signature'][:70]}' on {p['service']} ({s['count']} in window)"
+        elif o["source"] == "metrics_overview" and p.get("first_anomaly"):
+            anomalies.append(p["first_anomaly"])
+    if anomalies:
+        events[(min(anomalies), "a", "")] = "first metric anomaly"
+    events[(anchor.isoformat(), "z", "")] = "alert fired, incident opened"
+    return [{"ts": k[0], "text": v} for k, v in sorted(events.items())]
+
+
+def _report(incident, S, ents, timeline, runbooks, similar, unrelated, calls, agent, mode) -> str:
     lines = [f"# Incident #{incident['id']}: {incident['title']}", "",
-             f"**Service:** {S} · **Severity:** {incident['severity']} · **Detected:** {incident['detected_at']:%Y-%m-%d %H:%M} UTC", "",
-             f"> {incident['symptom']}", ""]
-    if hyps and hyps[0]["category"] != "unknown":
-        top = hyps[0]
-        lines += ["## Most likely cause", "", f"**{top['title']}** (confidence {top['score']:.0%})", "", top["explanation"], ""]
+             f"**Service:** {S} · **Severity:** {incident['severity']} · **Detected:** {incident['detected_at']:%Y-%m-%d %H:%M} UTC · "
+             f"**Method:** {mode}", "", f"> {incident['symptom']}", ""]
+    top = ents[0]
+    if top["category"] != "unknown":
+        who = {"both": "rules and AI agree on the category", "rules": "from the rules", "llm": "from the AI only"}[top["source"]]
+        lines += ["## Most likely cause", "", f"**{top['title']}** (confidence {top['score']:.0%}, {who})", "", top["explanation"], ""]
     else:
         lines += ["## Most likely cause", "", "The collected evidence does not point to a known cause. See the observations below.", ""]
+    if agent:
+        rules_top = next((e for e in ents if e["rules"] is not None), None)
+        ai_top = agent.hypotheses[0] if agent.hypotheses else None
+        lines += ["## Rules vs AI", ""]
+        if rules_top and ai_top:
+            same = rules_top["category"] == ai_top["category"]
+            lines.append(f"- Rules ranked **{rules_top['category']}** first; the AI ranked **{ai_top['category']}** first. "
+                         + ("They **agree**." if same else "They **disagree**: check the evidence behind each before acting."))
+        elif ai_top:
+            lines.append(f"- The AI ranked **{ai_top['category']}** first (no rules result in this mode).")
+        if agent.summary:
+            lines += ["- AI summary (written by a model; verify against the evidence): " + agent.summary]
+        u = agent.usage
+        lines += [f"- AI usage: {u['llm_calls']} model call(s), {u['prompt_tokens']} prompt and {u['completion_tokens']} completion tokens."]
+        for w in agent.warnings:
+            lines.append(f"- Warning: {w}.")
+        lines.append("")
     lines += ["## Timeline (UTC)", ""] + [f"- `{e['ts'][11:19]}` {e['text']}" for e in timeline] + [""]
     lines += ["## Hypotheses", ""]
-    for i, h in enumerate(hyps, 1):
-        lines.append(f"{i}. **{h['title']}**: {h['score']:.0%}")
+    tag = {"rules": "rules", "llm": "AI", "both": "rules + AI"}
+    for i, h in enumerate(ents, 1):
+        lines.append(f"{i}. **{h['title']}**: {h['score']:.0%} [{tag[h['source']]}]")
         for _, stance, note in h["evidence"]:
             lines.append(f"   - {'supports' if stance == 'supports' else 'REFUTES'}: {note}")
     lines.append("")
@@ -260,91 +328,66 @@ def _report(incident, S, hyps, timeline, runbooks, similar, unrelated, calls) ->
         for r in runbooks:
             lines += [f"**{r['title']}**", "", r["body"], ""]
     lines += ["---", f"*Read-only investigation: {calls} tool calls. PagerLens never changes your systems; "
-                    "all remediation above is for a human to perform. Log excerpts are data, not instructions.*"]
+                    "all remediation above is for a human to perform. Log excerpts and AI text are data, not instructions.*"]
     return "\n".join(lines)
 
 
-def investigate(conn, incident_id: int, *, mode: str = "rules", use_memory: bool = True, account: str | None = None) -> int:
+def investigate(conn, incident_id: int, *, mode: str = "rules", use_memory: bool = True, account: str | None = None,
+                chat_cfg: ChatConfig | None = None) -> int:
     """Run one investigation and return its run id. Raises ToolError for an unknown incident."""
-    if mode != "rules":
-        raise ValueError("only the rules investigator is available in this build")
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of: {', '.join(MODES)}")
+    if mode != "rules" and chat_cfg is None:
+        raise ValueError(f"mode '{mode}' needs a chat account")
     ctx = tools.make_ctx(conn, incident_id)
     budget = Budget()
     run_id = conn.execute("INSERT INTO run (incident_id, mode, use_memory, account, budget) VALUES (%s,%s,%s,%s,%s::jsonb) RETURNING id",
-                          (incident_id, mode, use_memory, account, json.dumps({"max_tool_calls": budget.max_calls}))).fetchone()["id"]
+                          (incident_id, mode, use_memory, account, json.dumps(
+                              {"max_tool_calls": budget.max_calls, **({"max_llm_tool_calls": MAX_LLM_TOOL_CALLS} if mode != "rules" else {})}))
+                          ).fetchone()["id"]
     conn.execute("UPDATE incident SET status='investigating' WHERE id=%s AND status='open'", (incident_id,))
     conn.commit()
     rec = Recorder(conn, run_id, incident_id)
     try:
         S = ctx.service
-        overview, _ = call_tool(ctx, rec, budget, "service_overview", service=S)
-        targets = [S] + overview.data["depends_on"]
-        M, SIG, DEP = {}, {}, {}
-        for svc in targets:
-            r, o = call_tool(ctx, rec, budget, "metrics_overview", service=svc)
-            M[svc] = (r.data, o)
-            r, o = call_tool(ctx, rec, budget, "error_signatures", service=svc)
-            SIG[svc] = (r.data, o)
-            r, o = call_tool(ctx, rec, budget, "recent_deploys", service=svc)
-            DEP[svc] = (r.data, o)
-        # refuting check: are other services' deploys the real story? (read-only, bounded)
-        unrelated = []
-        for other in [r["name"] for r in conn.execute("SELECT name FROM service ORDER BY name")]:
-            if other in targets or len(unrelated) >= 5:
-                continue
-            r, _ = call_tool(ctx, rec, budget, "recent_deploys", service=other, since_minutes=60)
-            unrelated += [f"{other} {d['version']} ({d['minutes_before_alert']:.0f} min before the alert): not a dependency of {S}"
-                          for d in r.data["deploys"]]
-        anomalies = sorted(_dt(d["first_anomaly"]) for d, _ in M.values() if d.get("first_anomaly"))
-        onset = anomalies[0] if anomalies else None
-        hyps = _hypotheses(S, targets, M, SIG, DEP, onset)
-
-        similar: list[dict] = []
-        if use_memory:
-            top_sigs = [s["signature"] for svc in targets for s in SIG[svc][0]["signatures"][:2]]
-            r, sim_obs = call_tool(ctx, rec, budget, "find_similar_incidents",
-                                   text=f"{S}: {ctx.symptom} | " + " | ".join(top_sigs[:6]))
-            similar = r.data["incidents"]
-            for h in hyps:
-                match = [s for s in similar if s["root_cause_category"] == h.category and s["similarity"] >= 0.3]
-                if match:
-                    best = max(s["similarity"] for s in match)
-                    h.support(sim_obs, min(0.2, 0.25 * best),
-                              f"{len(match)} similar past incident(s) were resolved as {h.category} (best similarity {best:.2f})")
-
-        for h in hyps:
-            h.score = max(0.01, min(0.99, h.score))
-        hyps.sort(key=lambda h: h.score, reverse=True)
-        if not hyps:
-            h = Hyp("unknown", S, "No known failure pattern matches the evidence")
-            h.score = 0.05
-            _, o = SIG[S]
-            h.evidence.append((o, "supports", "no deploy, resource, dependency, traffic or certificate pattern was found"))
-            h.notes.append("The checks did not match a known pattern; review the error signatures and metrics manually.")
-            hyps = [h]
-        rbs, _ = call_tool(ctx, rec, budget, "find_runbooks", query=f"{hyps[0].title} {S}",
-                           category=hyps[0].category if hyps[0].category != "unknown" else None)
-        stored = []
-        for rank, h in enumerate(hyps, 1):
-            explanation = "; ".join(h.notes) if h.notes else h.title
+        rules = _rules_phase(ctx, rec, budget, use_memory) if mode in ("rules", "hybrid") else None
+        agent, warnings = None, []
+        llm_budget = Budget(MAX_LLM_TOOL_CALLS)
+        if mode in ("llm", "hybrid"):
+            index = [{"observation_id": r["id"], "source": r["source"], "summary": r["summary"]}
+                     for r in conn.execute("SELECT id, source, summary FROM observation WHERE run_id=%s ORDER BY id", (run_id,))] if rules else None
+            try:
+                agent = llm_agent.run_agent(ctx, rec, llm_budget, chat_cfg, evidence_index=index, allow_memory=use_memory)
+                warnings += agent.warnings
+            except LLMError as exc:
+                if mode == "llm":
+                    raise
+                warnings.append(f"the AI step failed ({exc}); the rules result is shown on its own")
+        ents = _combine(mode, rules, agent, S)
+        rbs, _ = call_tool(ctx, rec, budget, "find_runbooks", query=f"{ents[0]['title']} {S}",
+                           category=ents[0]["category"] if ents[0]["category"] != "unknown" else None)
+        for rank, e in enumerate(ents, 1):
             hid = conn.execute(
-                "INSERT INTO hypothesis (incident_id, run_id, category, title, explanation, score, rank, suspect) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-                (incident_id, run_id, h.category, h.title, explanation, h.score, rank, h.suspect)).fetchone()["id"]
-            for obs_id, stance, note in h.evidence:
+                "INSERT INTO hypothesis (incident_id, run_id, category, title, explanation, score, rank, suspect, source, "
+                "rules_score, llm_score, grounded) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                (incident_id, run_id, e["category"], e["title"], e["explanation"], e["score"], rank, e["suspect"], e["source"],
+                 e["rules"], e["llm"], e["grounded"])).fetchone()["id"]
+            for obs_id, stance, note in e["evidence"]:
                 conn.execute("INSERT INTO hypothesis_evidence (hypothesis_id, observation_id, stance, note) VALUES (%s,%s,%s,%s)",
                              (hid, obs_id, stance, note))
-            stored.append({"category": h.category, "title": h.title, "score": h.score, "explanation": explanation,
-                           "evidence": h.evidence})
-        rec.step("hypotheses", None, {}, f"{len(stored)} hypothesis(es); top: {stored[0]['title']}", len(stored), None)
+        rec.step("hypotheses", None, {}, f"{len(ents)} hypothesis(es); top: {ents[0]['title']}", len(ents), None)
         incident = conn.execute("SELECT id, title, severity, symptom, detected_at FROM incident WHERE id=%s", (incident_id,)).fetchone()
-        md = _report(incident, S, stored, _timeline(S, targets, DEP, SIG, onset, ctx.anchor), rbs.data["runbooks"][:2],
-                     similar[:3], unrelated, budget.calls)
+        calls = budget.calls + llm_budget.calls
+        md = _report(incident, S, ents, _timeline(conn, run_id, ctx.anchor), rbs.data["runbooks"][:2],
+                     (rules.similar[:3] if rules else []), (rules.unrelated if rules else []), calls, agent, mode)
         conn.execute("INSERT INTO report (incident_id, run_id, markdown) VALUES (%s,%s,%s)", (incident_id, run_id, md))
         rec.step("report", None, {}, "report written", None, None)
-        retrieval.remember_incident(conn, incident_id, [s["signature"] for svc in targets for s in SIG[svc][0]["signatures"][:3]])
-        conn.execute("UPDATE run SET status='done', finished_at=now(), usage=%s::jsonb WHERE id=%s",
-                     (json.dumps({"tool_calls": budget.calls, "tool_ms": budget.ms}), run_id))
+        sigs = [s["signature"] for o in conn.execute("SELECT payload FROM observation WHERE run_id=%s AND source='error_signatures' ORDER BY id", (run_id,))
+                for s in o["payload"].get("signatures", [])[:3]]
+        retrieval.remember_incident(conn, incident_id, sigs)
+        usage = {"tool_calls": calls, "tool_ms": budget.ms + llm_budget.ms, **(agent.usage if agent else {})}
+        conn.execute("UPDATE run SET status='done', finished_at=now(), usage=%s::jsonb, warning=%s WHERE id=%s",
+                     (json.dumps(usage), "; ".join(warnings)[:500] or None, run_id))
         conn.commit()
     except Exception as exc:
         conn.rollback()

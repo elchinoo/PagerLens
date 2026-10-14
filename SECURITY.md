@@ -67,8 +67,16 @@ affected version or commit.
   text for a person to carry out.
 - Simulated incidents keep their true cause in a separate table that the investigation code never reads.
 - The data is single-tenant: anyone with `read` access sees every service, log line and incident.
-- Provider accounts are stored for the planned LLM investigator; when it exists, log excerpts sent to a provider
-  will leave your server, so choose a provider accordingly.
+- **AI investigations.** The AI and Rules + AI methods send incident context and log excerpts to the chat provider
+  you choose, using a stored key that is checked before the run starts. The model can only call the registered
+  read-only tools (unknown tools are refused, unknown arguments dropped), sees tool results fenced as untrusted
+  data, and is bounded by tool-call, round and time limits. Its answer is validated before use: unknown categories
+  become `unknown`, citations of observations that do not exist for the incident are dropped, ungrounded
+  hypotheses are heavily discounted, and its text is scrubbed again. It has no tool that changes any system and
+  its output never triggers an action. A model can still be misled by hostile log text into a wrong *opinion*; the
+  protection is that opinions need real cited evidence, are shown next to the rules' verdict, and a human decides.
+  Model-written text in reports is labelled as such.
+- Only a `full` token (or an admin session) can start an AI investigation, because it spends provider credit.
 
 **Platform**
 - The container runs as a non-root user. Secrets are never baked into the image or stored in the repository.

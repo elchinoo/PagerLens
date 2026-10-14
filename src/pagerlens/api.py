@@ -578,7 +578,7 @@ def ingest_alert(body: AlertBody):
 # --- incidents, investigation, learning ---------------------------------------------------------
 
 class InvestigateBody(BaseModel):
-    mode: str = Field(default="rules", pattern="^(rules|llm)$")
+    mode: str = Field(default="rules", pattern="^(rules|llm|hybrid)$")
     use_memory: bool = True
     account: str | None = Field(default=None, pattern=r"^(env|\d{1,12})$")
 
@@ -613,10 +613,17 @@ def get_incident(incident_id: int):
 
 @app.post("/api/incidents/{incident_id}/investigate", dependencies=[Depends(require("full"))])
 def investigate(incident_id: int, body: InvestigateBody):
-    if body.mode == "llm":
-        raise HTTPException(501, "the LLM investigator is not available in this build; use mode 'rules'")
+    """rules: deterministic. llm: a model drives the read-only tools. hybrid: both, reconciled. The AI modes use
+    one of your chat accounts and spend its credit; the key is checked before anything runs (423 if locked)."""
     with _translate(), connect_vector() as conn:
-        run_id = investigator.investigate(conn, incident_id, mode=body.mode, use_memory=body.use_memory, account=body.account)
+        cfg = None
+        if body.mode != "rules":
+            if not body.account:
+                raise HTTPException(422, "choose a chat account for the AI modes")
+            cfg = accounts.chat_config_for(conn, _ref(body.account))
+            cfg.api_key()  # raises VaultLocked now rather than after a run has started
+        run_id = investigator.investigate(conn, incident_id, mode=body.mode, use_memory=body.use_memory,
+                                          account=body.account, chat_cfg=cfg)
         return {"run_id": run_id, **incidents.get_incident(conn, incident_id)}
 
 

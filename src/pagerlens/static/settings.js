@@ -23,7 +23,7 @@ async function renderAccounts() {
   }
   fill(box,
     h("div", { class: "row" }, h("h2", {}, "Provider accounts"), h("button", { class: "primary", type: "button", onclick: () => showForm(null) }, "Add account")),
-    h("p", { class: "muted" }, "Add as many OpenAI-compatible accounts as you like (OpenAI, OpenRouter, GLM, Kimi, Claude and others). They are used by the LLM investigator (coming soon); the rules investigator needs none."),
+    h("p", { class: "muted" }, "Add as many OpenAI-compatible accounts as you like (OpenAI, OpenRouter, GLM, Kimi, Claude and others). They power the AI and Rules + AI investigations (choose one per investigation); the rules investigator needs none."),
     notice, formHost,
     cards.length ? h("div", { class: "acct-grid" }, ...cards) : h("p", { class: "empty" }, "No accounts yet."));
 }

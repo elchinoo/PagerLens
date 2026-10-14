@@ -12,7 +12,11 @@ def main(argv: list[str] | None = None) -> int:
     inv = sub.add_parser("investigate", help="investigate an incident from the terminal")
     inv.add_argument("incident_id", type=int)
     inv.add_argument("--no-memory", action="store_true")
-    sub.add_parser("eval", help="before/after learning evaluation on the simulator (resets demo telemetry)")
+    inv.add_argument("--mode", choices=["rules", "llm", "hybrid"], default="rules")
+    inv.add_argument("--account", default=None, help="chat account id, or 'env' (LLM_BASE_URL, LLM_API_KEY, LLM_CHAT_MODEL)")
+    ev = sub.add_parser("eval", help="before/after learning evaluation on the simulator (resets demo telemetry)")
+    ev.add_argument("--mode", choices=["rules", "llm", "hybrid"], default="rules")
+    ev.add_argument("--account", default=None, help="chat account id, or 'env'; AI modes spend provider credit")
     sub.add_parser("serve", help="run the API + MCP server")
     sub.add_parser("reset-admin", help="forget the admin password and delete stored provider keys (recovery)")
     sub.add_parser("start", help="container entrypoint: migrate, optionally seed (AUTO_SEED=true), serve")
@@ -42,7 +46,9 @@ def main(argv: list[str] | None = None) -> int:
         from .db import connect_vector
 
         with connect_vector() as conn:
-            run_id = investigator.investigate(conn, args.incident_id, use_memory=not args.no_memory)
+            cfg = _chat_cfg(conn, args.mode, args.account)
+            run_id = investigator.investigate(conn, args.incident_id, mode=args.mode, use_memory=not args.no_memory,
+                                              account=args.account, chat_cfg=cfg)
             print(incidents.get_incident(conn, args.incident_id)["report"]["markdown"])
         print(f"\n(run #{run_id})")
     elif args.cmd == "eval":
@@ -50,9 +56,11 @@ def main(argv: list[str] | None = None) -> int:
         from .db import connect_vector
 
         with connect_vector() as conn:
-            r = evaluate.run(conn)
+            r = evaluate.run(conn, mode=args.mode, chat_cfg=_chat_cfg(conn, args.mode, args.account))
         for phase in ("cold", "warm"):
             print(f"{phase}: top-1 {r[phase + '_top1']:.0%}, top-3 {r[phase + '_top3']:.0%}")
+        if args.mode != "rules":
+            print(f"tokens used: {r['tokens']['prompt']} prompt, {r['tokens']['completion']} completion")
     elif args.cmd == "reset-admin":
         from . import auth
         from .db import connect
@@ -65,6 +73,18 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "start":
         return _start()
     return 0
+
+
+def _chat_cfg(conn, mode: str, account: str | None):
+    if mode == "rules":
+        return None
+    if not account:
+        raise SystemExit("the AI modes need --account <id|env>")
+    from . import accounts
+
+    cfg = accounts.chat_config_for(conn, account if account == "env" else int(account))
+    cfg.api_key()  # a stored key is locked outside the web app (vault); use 'env' for the CLI
+    return cfg
 
 
 def _seed() -> None:

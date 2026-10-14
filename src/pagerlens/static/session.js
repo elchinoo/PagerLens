@@ -90,7 +90,7 @@ export function renderVaultBanner() {
   const err = h("span", { class: "error" });
   b.replaceChildren(
     h("strong", {}, "Provider keys are locked."),
-    " The server restarted, so stored keys can't be used (external embeddings and Ask are paused) until you unlock them.",
+    " The server restarted, so stored provider keys can't be used (AI and Rules + AI investigations are paused; Rules still work) until you unlock them.",
     h("form", {
       class: "inline",
       onsubmit: async (e) => {

@@ -19,6 +19,7 @@ It ships with a **self-contained demo**: a fictional five-service online shop th
 
 - **Lab:** nine scripted failures (bad release, database pool exhaustion, memory leak, dependency outage, traffic spike, expired certificate, and three deliberately confusing mixes). The simulator writes realistic telemetry through the same ingest path real services use, fires the alert, and keeps the true cause hidden.
 - **Investigation:** a bounded, read-only run that records every step. Each hypothesis cites observations that *support* or *refute* it, and you can open the raw data behind any claim. Red herrings (an unrelated deploy, a downstream victim) are checked and called out.
+- **Three methods:** *Rules* (deterministic, free), *AI* (a model drives the same read-only tools) and *Rules + AI* (both, reconciled: agreement is rewarded, disagreement is shown, and anything the model says is checked against real evidence before it counts).
 - **Memory:** mark the real cause and the incident is embedded in pgvector. Similar future incidents recall it as a prior. `pagerlens eval` measures a cold run against a warm one with the hidden answers.
 - **Runbooks:** retrieved with hybrid vector + full-text search (reciprocal rank fusion) and attached to the report as *manual* next steps.
 - **MCP server** at `/mcp` for Claude Code, VS Code, Codex, Cursor and more: ask "why is checkout failing?" from your editor.
@@ -42,7 +43,8 @@ The first time the server starts it prints a **one-time setup code**. Open the a
 
 1. Open **Lab** and press **Break it** on any scenario.
 2. On the incident page press **Investigate**. Read the hypotheses and open the evidence links.
-3. Press **Mark resolved** with the real cause, break the same thing again and investigate: the memory shows up in the report.
+3. Add a chat account under **Settings** and try **Rules + AI**: compare the two verdicts and open the evidence each one cites.
+4. Press **Mark resolved** with the real cause, break the same thing again and investigate: the memory shows up in the report.
 
 Or run everything in containers: `docker compose up` serves the app on http://localhost:8001 (check the `api` log for the setup code).
 
@@ -55,11 +57,42 @@ Or run everything in containers: `docker compose up` serves the app on http://lo
 5. **Memory prior:** similar resolved incidents add a small, visible boost to the category they were resolved as.
 6. **Report:** Markdown with timeline, ranked hypotheses, similar past incidents and runbook steps, ready to paste into Slack or an issue.
 
-The default investigator is **rules based**: transparent heuristics you can read in [`investigator.py`](src/pagerlens/investigator.py), no model and no provider account needed. An LLM investigator that drives the same read-only tools is planned; the API already rejects `mode: "llm"` with a clear message until it exists.
+### Three methods
+
+| Method | What runs | Needs |
+|---|---|---|
+| **Rules** | The deterministic investigator above. Transparent heuristics you can read in [`investigator.py`](src/pagerlens/investigator.py). | nothing |
+| **AI** | A model drives the *same* read-only tools in a bounded loop (at most 10 model calls and 12 tool calls) and answers with ranked hypotheses that cite observation ids. | a chat account |
+| **Rules + AI** (hybrid) | Rules first. The model then investigates the same incident and may cite the rules' observations. The two sets of hypotheses are reconciled. A lone AI opinion can never outrank a well-supported rules result, however confident it sounds. | a chat account |
+
+**How hybrid reconciles them.** Hypotheses are matched by category (and by suspect service when both name one).
+
+| Situation | Score |
+|---|---|
+| Rules and AI both found it | `0.5 × rules + 0.5 × AI confidence + 0.1` (capped at 99%) |
+| Only the rules found it | `0.85 × rules`: the model did not corroborate it |
+| Only the AI found it, citing real evidence | `0.5 × AI confidence` (at most 50%) |
+| Only the AI found it and cited nothing real ("ungrounded") | `0.2 × AI confidence` |
+
+The report has a **Rules vs AI** section stating whether the two agree, with the model's summary clearly labelled as model-written, and every hypothesis is tagged `rules`, `AI` or `rules + AI`. If the AI step fails in hybrid mode (bad key, provider down, unusable answer), the rules result is kept and the run records a warning.
+
+**What keeps the model contained** (each point has a test):
+
+- It can only call the registered **read-only** tools. Unknown tools are refused and unknown arguments are dropped. It has no tool that changes anything, and its output never triggers an action.
+- Tool results reach it fenced as `<untrusted_data>`, truncated, with any attempt to close the fence removed. The system prompt tells it never to follow instructions found in that data.
+- Its answer is validated: categories must be known, cited observations must exist **for this incident** (invented or foreign ids are dropped, with a warning), and its text is scrubbed again. Ungrounded claims are discounted hard.
+- The tool-call budget, the number of rounds and a time limit bound every run. Token usage is recorded per run and shown in the run viewer.
+- The provider key is checked **before** a run starts, so a locked vault returns `423` without creating a run. Memory off means the model is not even offered the memory tool.
+
+Choose the provider with care: **log excerpts leave your server** for the AI and Rules + AI methods. PagerLens scrubs logs when they are ingested, but scrubbing is pattern based.
+
+**Provider compatibility.** The AI methods use the OpenAI-style `/chat/completions` endpoint with function calling (`tools`). OpenAI, OpenRouter, and other OpenAI-compatible servers whose chosen model supports tools should work, and the same Settings presets as before apply. This has been tested end to end against a scripted stand-in provider only (including the real HTTP path, the encrypted key and the vault), **not** against live OpenAI, Claude, GLM, Kimi or OpenRouter models. A model that ignores `tools` simply returns an unusable answer, which is reported as such.
 
 ### What the evaluation does and does not show
 
-`pagerlens eval` replays all nine scenarios cold (no memory), teaches the memory the true causes, then replays them with different noise and reports top-1 and top-3 accuracy. On a clean database it currently reports top-3 of 100% in both passes, and one scenario (a release that introduces a memory leak) misses at rank 1 until memory has seen a similar case.
+`pagerlens eval` replays all nine scenarios cold (no memory), teaches the memory the true causes, then replays them with different noise and reports top-1 and top-3 accuracy. For the **rules** method on a clean database it currently reports top-3 of 100% in both passes, and one scenario (a release that introduces a memory leak) misses at rank 1 until memory has seen a similar case.
+
+`pagerlens eval --mode hybrid --account env` (or `llm`) runs the same comparison with a model and prints the tokens used. It makes 18 investigations against your provider and spends credit, and **I have not run it against a live model**, so there are no AI accuracy numbers to quote yet. Use `env` for the CLI (set `LLM_BASE_URL`, `LLM_API_KEY` and `LLM_CHAT_MODEL`): accounts stored in the web app are locked outside the browser.
 
 Read that honestly: the scenarios and the rules were written by the same people, the data is synthetic, and the warm pass replays scenario *shapes*, so it measures recall of similar past incidents rather than general skill. It is a regression test and a demonstration of the loop, not evidence about your production incidents. Running it resets the demo telemetry and removes the incidents it created.
 
@@ -103,7 +136,7 @@ Files full of credentials are the usual way these tools leak, so PagerLens avoid
 | **Admin password** | Entered once in the browser (first run needs the setup code from the server log) | Stored only as a salted **scrypt** hash. |
 | **Browser session** | An `HttpOnly`, `SameSite=Strict` cookie (`Secure` over HTTPS) | Random value, only its SHA-256 stored server-side, 12-hour expiry. State-changing browser requests also need a custom header. |
 | **API tokens** | Created in **Settings**, shown **once** | Only a SHA-256 hash is stored. Revocable. Scopes: `read` (list and read), `ingest` (push telemetry, read nothing, no MCP) and `full`. |
-| **Provider API keys** (for the coming LLM mode) | Entered in **Settings** | Encrypted (Fernet) with a random data key that your admin password wraps. The database alone reveals nothing; never returned by the API or logged. |
+| **Provider API keys** (for the AI methods) | Entered in **Settings** | Encrypted (Fernet) with a random data key that your admin password wraps. The database alone reveals nothing; never returned by the API or logged. |
 
 After a **restart** stored provider keys are locked until you sign in. `pagerlens reset-admin` is the only recovery from a lost password and it deletes the stored keys. See [SECURITY.md](SECURITY.md) for the full model and its limits.
 
@@ -119,7 +152,7 @@ PagerLens serves [MCP](https://modelcontextprotocol.io) over streamable HTTP at 
 | `get_timeline(incident_id)` | read | The report's timeline |
 | `similar_incidents(text, limit?)` | read | Resolved incidents that look similar, with how they were resolved |
 | `search_runbooks(query, limit?)` | read | Hybrid search over runbooks |
-| `investigate(incident_id, use_memory?)` | **full** | Run a bounded, read-only investigation |
+| `investigate(incident_id, use_memory?, mode?, account?)` | **full** | Run a bounded, read-only investigation. `mode` is `rules` (default), `llm` or `hybrid`; the AI modes need `account` (a chat account id, or `env`) and spend that provider's credit |
 | `add_note(incident_id, note)` | **full** | Attach a note |
 | `mark_root_cause(incident_id, category, note?)` | **full** | Record the confirmed cause; the incident becomes memory |
 
@@ -354,9 +387,9 @@ Notes:
 | `PAGERLENS_ALLOW_PRIVATE_LLM_URLS` | `false` | Allow provider URLs on loopback/private networks, for a local model server. Link-local is always blocked. |
 | `PAGERLENS_API_KEY` | none | Optional static full-access credential for automation (file alternative: `/etc/pagerlens/api_key`). Prefer API tokens. |
 | `PAGERLENS_ALLOW_ANONYMOUS` | `false` | `true` disables authentication entirely. Throwaway local demos only. |
-| `LLM_BASE_URL`, `LLM_API_KEY`, `EMBEDDING_MODEL`, `EMBEDDING_DIM` | none | Optional environment embedding provider for retrieval. The schema is created for `EMBEDDING_DIM` (default 768) on first start, so set it before the first run. Without a provider a built-in offline hashing embedder is used: it matches words, not meaning. |
+| `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_CHAT_MODEL`, `EMBEDDING_MODEL`, `EMBEDDING_DIM` | none | Optional environment provider: embeddings for retrieval, and the `env` chat account for the AI methods. The schema is created for `EMBEDDING_DIM` (default 768) on first start, so set it before the first run. Without a provider a built-in offline hashing embedder is used: it matches words, not meaning. |
 
-Retrieval embeddings are configured from the environment only in this version; the Settings page manages chat provider accounts for the upcoming LLM investigator.
+Retrieval embeddings are configured from the environment only in this version; the Settings page manages the chat provider accounts used by the AI methods. The same variables (`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_CHAT_MODEL`) also define the `env` account.
 
 ## Container image
 
@@ -439,7 +472,7 @@ See [SECURITY.md](SECURITY.md) for the model and to report a vulnerability priva
 
 - One small FastAPI service, plain-SQL migrations, no ORM, no queue: runs are synchronous and bounded.
 - The investigator only runs registered read-only tools with capped output; log text is stored and shown as data and never used as an instruction. Ground truth for simulated incidents lives in a table the investigation code never reads (a test enforces that).
-- Roadmap: LLM investigator over the same tools, provider-specific alert parsers, a scheduled collector for real platforms, and long-term telemetry storage.
+- Roadmap: live-provider evaluation numbers, provider-specific alert parsers, a scheduled collector for real platforms, and long-term telemetry storage.
 
 ## License
 

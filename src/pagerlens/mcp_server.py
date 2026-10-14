@@ -3,8 +3,9 @@ mark_root_cause) re-check that the caller's own token has full access, so a read
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from . import auth, incidents, investigator, retrieval
+from . import accounts, auth, incidents, investigator, retrieval, vault
 from .db import connect, connect_vector
+from .llm_http import LLMError
 
 mcp = MCPServer(
     "pagerlens",
@@ -87,13 +88,28 @@ def search_runbooks(query: str, limit: int = 3) -> list[dict]:
 
 
 @mcp.tool()
-def investigate(incident_id: int, ctx: Context, use_memory: bool = True) -> dict:
-    """Run a bounded, read-only investigation (needs a full-access token). Returns the ranked hypotheses and report."""
+def investigate(incident_id: int, ctx: Context, use_memory: bool = True, mode: str = "rules",
+                account: str | None = None) -> dict:
+    """Run a bounded, read-only investigation (needs a full-access token). mode is rules (default), llm or hybrid;
+    the AI modes need `account` (a chat account id or "env") and spend that provider's credit. Returns the ranked
+    hypotheses and the report."""
     _require_full(ctx)
     with connect_vector() as conn:
-        run_id = investigator.investigate(conn, incident_id, use_memory=use_memory)
+        cfg = None
+        if mode != "rules":
+            if not account:
+                raise ToolError("the AI modes need an account (a chat account id from the web app, or \"env\")")
+            try:
+                cfg = accounts.chat_config_for(conn, account if account == "env" else int(account))
+                cfg.api_key()
+            except (accounts.AccountError, vault.VaultError, ValueError) as exc:
+                raise ToolError(str(exc)) from exc
+        try:
+            run_id = investigator.investigate(conn, incident_id, mode=mode, use_memory=use_memory, account=account, chat_cfg=cfg)
+        except (ValueError, LLMError) as exc:
+            raise ToolError(str(exc)) from exc
         inc = incidents.get_incident(conn, incident_id)
-    return {"run_id": run_id, "hypotheses": [{k: h[k] for k in ("rank", "title", "category", "score", "explanation", "suspect")}
+    return {"run_id": run_id, "hypotheses": [{k: h[k] for k in ("rank", "title", "category", "score", "source", "explanation", "suspect")}
                                               for h in inc["hypotheses"]], "report": inc["report"]["markdown"]}
 
 

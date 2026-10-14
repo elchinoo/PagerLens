@@ -26,7 +26,7 @@ def get_incident(conn, incident_id: int) -> dict:
                                  "ORDER BY fired_at", (incident_id,)).fetchall()
     inc["notes"] = conn.execute("SELECT id, author, body, created_at FROM incident_note WHERE incident_id=%s ORDER BY id",
                                 (incident_id,)).fetchall()
-    inc["runs"] = conn.execute("SELECT id, mode, status, use_memory, error, usage, started_at, finished_at FROM run "
+    inc["runs"] = conn.execute("SELECT id, mode, status, use_memory, error, warning, usage, started_at, finished_at FROM run "
                                "WHERE incident_id=%s ORDER BY id DESC", (incident_id,)).fetchall()
     latest = inc["runs"][0]["id"] if inc["runs"] else None
     inc["hypotheses"] = _hypotheses(conn, latest) if latest else []
@@ -37,7 +37,8 @@ def get_incident(conn, incident_id: int) -> dict:
 
 
 def _hypotheses(conn, run_id: int) -> list[dict]:
-    hyps = conn.execute("SELECT id, category, title, explanation, score, rank, suspect FROM hypothesis WHERE run_id=%s "
+    hyps = conn.execute("SELECT id, category, title, explanation, score, rank, suspect, source, rules_score, llm_score, grounded "
+                        "FROM hypothesis WHERE run_id=%s "
                         "ORDER BY rank", (run_id,)).fetchall()
     for h in hyps:
         h["evidence"] = conn.execute(
@@ -47,7 +48,7 @@ def _hypotheses(conn, run_id: int) -> list[dict]:
 
 
 def get_run(conn, run_id: int) -> dict:
-    run = conn.execute("SELECT id, incident_id, mode, status, use_memory, error, budget, usage, started_at, finished_at "
+    run = conn.execute("SELECT id, incident_id, mode, status, use_memory, error, warning, budget, usage, started_at, finished_at "
                        "FROM run WHERE id=%s", (run_id,)).fetchone()
     if not run:
         raise NotFound("run not found")

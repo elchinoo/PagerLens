@@ -14,6 +14,7 @@ from pagerlens import (  # noqa: E402
     evaluate,
     incidents,
     investigator,
+    investigator_core,
     mcp_server,
     migrate,
     simulator,
@@ -167,7 +168,7 @@ def test_investigation_is_read_only_recorded_and_evidence_linked():
 
 
 def test_tool_call_budget_is_enforced(monkeypatch):
-    monkeypatch.setattr(investigator, "MAX_TOOL_CALLS", 3)
+    monkeypatch.setattr(investigator_core, "MAX_TOOL_CALLS", 3)
     with connect_vector() as conn:
         info = simulator.trigger(conn, "bad_deploy")
         conn.commit()
@@ -230,7 +231,7 @@ def test_api_flow_end_to_end(admin):
     assert admin.get("/api/incidents").json()["incidents"][0]["id"] == iid
     done = admin.post(f"/api/incidents/{iid}/investigate", json={"mode": "rules"}, headers=H)
     assert done.status_code == 200 and done.json()["hypotheses"][0]["category"] == "traffic_spike"
-    assert admin.post(f"/api/incidents/{iid}/investigate", json={"mode": "llm"}, headers=H).status_code == 501
+    assert admin.post(f"/api/incidents/{iid}/investigate", json={"mode": "llm"}, headers=H).status_code == 422  # needs an account
     tel = admin.get(f"/api/incidents/{iid}/telemetry").json()
     assert "request_rate" in tel["services"]["web-frontend"]["metrics"]
     obs_id = done.json()["hypotheses"][0]["evidence"][0]["observation_id"]
