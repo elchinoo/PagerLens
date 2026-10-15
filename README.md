@@ -400,17 +400,17 @@ The image runs `pagerlens start`: connect to the database (retrying while a scal
 ## Deploy on AgentPG
 
 > [!IMPORTANT]
-> **Free-tier sandboxes auto-pause when idle and cannot be kept awake.** `agentpg sandbox status` shows `Auto-pause: true`. A paused sandbox answers **503** and does not wake on a request. The free tier also allows **one sandbox at a time**, so delete another one (for example a TrustDesk sandbox) before creating this. Read [Troubleshooting](#troubleshooting) before you rely on a deployment.
+> **Free-tier sandboxes auto-pause when idle and cannot be kept awake.** `agentpg sandbox status` shows `Auto-pause: true`. A paused sandbox answers **503** and does not wake on a request. The free tier allows only **one sandbox at a time**; on a plan that allows more you can run this beside TrustDesk. Read [Troubleshooting](#troubleshooting) before you rely on a deployment.
 
 AgentPG sandboxes run any public image and can be linked to a Postgres instance, which injects the connection details (`PSQL_CONNECTION_STRING` and the `PG*` variables). PagerLens reads those automatically. **No key files are needed.**
 
-**Use a dedicated database.** PagerLens creates tables such as `app_setting` and `api_token` in the `public` schema; do not point it at the same database as another app that does the same (TrustDesk, for example).
+**Use a dedicated instance.** PagerLens creates tables such as `app_setting` and `api_token` in the `public` schema and records its migrations by file name. TrustDesk does the same with some identical names, so two apps in one database would collide, and the second one's migrations could be skipped silently. A sandbox links to an *instance* (its primary database), so give each app its own instance. They run side by side on the free-tier-and-up plans that allow several instances and sandboxes.
 
 ```bash
 agentpg login
-agentpg create <instance-name>                              # a new instance just for PagerLens; note its id
-agentpg extensions create <instance-id> vector              # may need elevated rights, so enable them here
-agentpg extensions create <instance-id> pg_trgm
+agentpg create --name <instance-name> --size small           # a new instance just for PagerLens; note its id
+agentpg extensions create vector <instance-id>              # may need elevated rights, so enable them here
+agentpg extensions create pg_trgm <instance-id>
 
 agentpg sandbox create pagerlens \
   --image ghcr.io/<owner>/pagerlens:latest \
