@@ -13,6 +13,9 @@ dependencies = [
   "httpx>=0.27",
   "mcp>=2.3",
   "cryptography>=43",
+  "opentelemetry-proto>=1.27",
+  "prometheus-client>=0.20",
+  "pyyaml>=6",
 ]
 
 [project.optional-dependencies]
@@ -20,6 +23,7 @@ dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.scripts]
 pagerlens = "pagerlens.cli:main"
+pagerlens-agent = "pagerlens.agent:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -18,6 +18,8 @@ from . import (
     incidents,
     ingest,
     investigator,
+    metrics,
+    otlp,
     simulator,
     vault,
 )
@@ -169,6 +171,19 @@ class Guard(BaseHTTPMiddleware):
     """MCP bearer auth (route dependencies don't apply to mounts), CSRF check, and security headers."""
 
     async def dispatch(self, request, call_next):
+        started = time.perf_counter()
+        status = 500
+        try:
+            resp = await self._dispatch(request, call_next)
+            status = resp.status_code
+            return resp
+        finally:
+            route = request.scope.get("route")
+            label = getattr(route, "path", None) or ("/mcp" if request.url.path.startswith("/mcp") else "other")
+            if label != "/metrics":
+                metrics.observe(request.method, label, status, started)
+
+    async def _dispatch(self, request, call_next):
         path = request.url.path
         if path == "/mcp":
             # Serve the bare path directly: the mount would answer with a redirect, and behind a TLS-terminating
@@ -182,10 +197,10 @@ class Guard(BaseHTTPMiddleware):
                 return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
             if principal is None:
                 return JSONResponse({"error": "authentication required"}, status_code=401)
-            if principal.scope == "ingest":  # write-only telemetry tokens never read incident data
-                return JSONResponse({"error": "ingest tokens cannot use MCP"}, status_code=403)
+            if principal.scope in ("ingest", "metrics"):  # telemetry-only tokens never read incident data
+                return JSONResponse({"error": f"{principal.scope} tokens cannot use MCP"}, status_code=403)
             request.scope["pagerlens_scope"] = principal.scope  # lets MCP tools gate state-changing calls
-        elif path.startswith("/api/") and _declared_length(request) > MAX_BODY:
+        elif path.startswith(("/api/", "/v1/")) and _declared_length(request) > MAX_BODY:
             return JSONResponse({"detail": "request body too large (2 MB limit)"}, status_code=413)
         elif (path.startswith("/api/") and request.method not in {"GET", "HEAD", "OPTIONS"}
               and _bearer(request) is None and not request.headers.get(CSRF_HEADER)):
@@ -267,7 +282,7 @@ class PasswordBody(BaseModel):
 
 class TokenBody(BaseModel):
     name: str = Field(min_length=1, max_length=60)
-    scope: str = Field(pattern="^(read|ingest|full)$")
+    scope: str = Field(pattern="^(read|ingest|metrics|full)$")
 
 
 def _start_session(conn, request: Request, response: Response) -> None:
@@ -537,6 +552,7 @@ def ingest_logs(body: LogsBody):
     with _translate(), connect() as conn:
         n = ingest.ingest_logs(conn, body.service, body.events)
         conn.commit()
+    metrics.INGESTED.labels("logs").inc(n)
     return {"accepted": n}
 
 
@@ -545,6 +561,7 @@ def ingest_metrics(body: MetricsBody):
     with _translate(), connect() as conn:
         n = ingest.ingest_metrics(conn, body.service, body.points)
         conn.commit()
+    metrics.INGESTED.labels("metrics").inc(n)
     return {"accepted": n}
 
 
@@ -592,6 +609,64 @@ class NoteBody(BaseModel):
     body: str = Field(min_length=1, max_length=4000)
 
 
+# --- OTLP/HTTP receiver and Prometheus metrics ---------------------------------------------------------------
+
+async def _read_capped(request: Request) -> bytes:
+    data = bytearray()
+    async for chunk in request.stream():
+        data += chunk
+        if len(data) > MAX_BODY:
+            raise HTTPException(413, "request body too large (2 MB limit)")
+    return bytes(data)
+
+
+async def _otlp(request: Request, kind: str):
+    raw = await _read_capped(request)
+    protobuf = "protobuf" in request.headers.get("content-type", "").lower()
+    try:
+        data = otlp.decode(raw, request.headers.get("content-type", ""), request.headers.get("content-encoding", "").lower(),
+                           otlp.REQUESTS[kind])
+        if kind == "traces":
+            count = sum(len(ss.get("spans") or []) for rs in data.get("resourceSpans") or [] for ss in rs.get("scopeSpans") or [])
+            accepted, rejected, note = 0, count, "traces are acknowledged but not stored in this version"
+        else:
+            with connect() as conn:
+                accepted, rejected = (otlp.store_logs if kind == "logs" else otlp.store_metrics)(conn, data)
+                conn.commit()
+            note = "some items were not stored (missing service.name, bad metric name or type)"
+    except otlp.OtlpError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except (ingest.IngestError, psycopg.Error, RuntimeError) as exc:
+        if isinstance(exc, ingest.IngestError):
+            raise HTTPException(400, str(exc)) from exc
+        raise _db_unavailable() from exc
+    if kind != "traces":
+        metrics.INGESTED.labels(f"otlp_{kind}").inc(accepted)
+    body, ctype = otlp.ack(kind, rejected, note, protobuf)
+    return Response(body, media_type=ctype)
+
+
+@app.post("/v1/logs", dependencies=[Depends(require("ingest"))])
+async def otlp_logs(request: Request):
+    return await _otlp(request, "logs")
+
+
+@app.post("/v1/metrics", dependencies=[Depends(require("ingest"))])
+async def otlp_metrics(request: Request):
+    return await _otlp(request, "metrics")
+
+
+@app.post("/v1/traces", dependencies=[Depends(require("ingest"))])
+async def otlp_traces(request: Request):
+    return await _otlp(request, "traces")
+
+
+@app.get("/metrics", dependencies=[Depends(require("metrics"))])
+def prometheus_metrics():
+    body, ctype = metrics.render()
+    return Response(body, media_type=ctype)
+
+
 @app.get("/api/fleet", dependencies=[Depends(require("read"))])
 def get_fleet():
     with connect() as conn:
@@ -622,8 +697,13 @@ def investigate(incident_id: int, body: InvestigateBody):
                 raise HTTPException(422, "choose a chat account for the AI modes")
             cfg = accounts.chat_config_for(conn, _ref(body.account))
             cfg.api_key()  # raises VaultLocked now rather than after a run has started
-        run_id = investigator.investigate(conn, incident_id, mode=body.mode, use_memory=body.use_memory,
-                                          account=body.account, chat_cfg=cfg)
+        try:
+            run_id = investigator.investigate(conn, incident_id, mode=body.mode, use_memory=body.use_memory,
+                                              account=body.account, chat_cfg=cfg)
+        except Exception:
+            metrics.INVESTIGATIONS.labels(body.mode, "failed").inc()
+            raise
+        metrics.INVESTIGATIONS.labels(body.mode, "done").inc()
         return {"run_id": run_id, **incidents.get_incident(conn, incident_id)}
 
 

@@ -14,6 +14,9 @@ CATEGORIES = {
     "dependency_outage": "A dependency the service relies on is failing",
     "traffic_spike": "Traffic surged beyond capacity",
     "expired_certificate": "A TLS certificate expired or is invalid",
+    "service_down": "A service stopped answering health checks",
+    "sandbox_paused": "The hosting platform paused or stopped the sandbox",
+    "database_unreachable": "The service is up but its database is unreachable",
     "unknown": "Not enough evidence",
 }
 

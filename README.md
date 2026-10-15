@@ -20,6 +20,7 @@ It ships with a **self-contained demo**: a fictional five-service online shop th
 - **Lab:** nine scripted failures (bad release, database pool exhaustion, memory leak, dependency outage, traffic spike, expired certificate, and three deliberately confusing mixes). The simulator writes realistic telemetry through the same ingest path real services use, fires the alert, and keeps the true cause hidden.
 - **Investigation:** a bounded, read-only run that records every step. Each hypothesis cites observations that *support* or *refute* it, and you can open the raw data behind any claim. Red herrings (an unrelated deploy, a downstream victim) are checked and called out.
 - **Three methods:** *Rules* (deterministic, free), *AI* (a model drives the same read-only tools) and *Rules + AI* (both, reconciled: agreement is rewarded, disagreement is shown, and anything the model says is checked against real evidence before it counts).
+- **Collection:** push API, OpenTelemetry (OTLP/HTTP) and a pull agent with health probes and Prometheus scraping. See [How data gets in](#how-data-gets-in).
 - **Memory:** mark the real cause and the incident is embedded in pgvector. Similar future incidents recall it as a prior. `pagerlens eval` measures a cold run against a warm one with the hidden answers.
 - **Runbooks:** retrieved with hybrid vector + full-text search (reciprocal rank fusion) and attached to the report as *manual* next steps.
 - **MCP server** at `/mcp` for Claude Code, VS Code, Codex, Cursor and more: ask "why is checkout failing?" from your editor.
@@ -52,7 +53,7 @@ Or run everything in containers: `docker compose up` serves the app on http://lo
 
 1. **Triage:** an alert opens an incident, or joins an open one with the same fingerprint or a near-identical symptom (pgvector similarity).
 2. **Evidence:** for the alerting service and everything it depends on: metrics compared to a baseline, grouped error signatures with first-seen times, and deploys shortly before the first anomaly. Every tool call is a capped `SELECT`, logged as a run step, and stored as an observation with a digest.
-3. **Hypotheses:** six failure patterns are scored from the evidence. A dependency that is itself failing is blamed rather than the alerting service. A deploy is only blamed if the new error appeared *after* it.
+3. **Hypotheses:** nine failure patterns are scored from the evidence (bad deploy, database saturation, resource exhaustion, dependency outage, traffic spike, expired certificate, service down, sandbox paused, database unreachable). For on/off health signals only the most recent samples count, so a fresh outage is not averaged away, and a newly monitored service with no history can still be diagnosed. A dependency that is itself failing is blamed rather than the alerting service. A deploy is only blamed if the new error appeared *after* it.
 4. **Refuting checks:** unrelated deploys, load that explains memory growth, and similar contradictions subtract from a hypothesis and are shown as such.
 5. **Memory prior:** similar resolved incidents add a small, visible boost to the category they were resolved as.
 6. **Report:** Markdown with timeline, ranked hypotheses, similar past incidents and runbook steps, ready to paste into Slack or an issue.
@@ -127,6 +128,53 @@ curl -X POST https://<your-host>/api/ingest/services -H "Authorization: Bearer $
 - Every log line is **scrubbed before it is stored**: emails, IPv4/IPv6 addresses, card numbers, SSNs, phone numbers, bearer tokens, JWTs, API-key shapes and `password=`/`token=` values. Scrubbing is best effort and pattern based; do not rely on it as a licence to log secrets.
 - Webhooks from Grafana, Alertmanager or similar tools can post to `/api/ingest/alerts` through a small relay; there is no provider-specific parser yet.
 
+## How data gets in
+
+| Path | Who sends it | Use it for |
+|---|---|---|
+| **Push API** (`/api/ingest/*`) | your own code, scripts, webhooks | logs, metrics, deploys, alerts, services |
+| **OpenTelemetry (OTLP/HTTP)** (`/v1/logs`, `/v1/metrics`) | any OpenTelemetry SDK or Collector | apps you can instrument, with no PagerLens-specific code |
+| **`pagerlens-agent`** (pull) | a small program you run anywhere | services that cannot push, black-box health, Prometheus `/metrics`, sandbox status |
+
+All three need an **Ingest** token (the agent also uses a **Metrics** token for each target it scrapes). Everything goes through the same validation and PII scrubbing. Apps that report their own telemetry need no access to your hosting platform.
+
+### OpenTelemetry
+
+Point any OTLP/HTTP exporter at PagerLens. For example with the Python SDK or the Collector's `otlphttp` exporter:
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=https://<your-host>
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer $PAGERLENS_TOKEN"
+export OTEL_SERVICE_NAME=checkout-api
+export OTEL_RESOURCE_ATTRIBUTES="service.version=2.14.0,pagerlens.depends_on=payments-gateway,inventory-api"
+```
+
+- Accepted: protobuf or JSON, optionally gzip (decompression is bounded), logs and metrics. **Traces are acknowledged but not stored** in this version.
+- `service.name` becomes the service. A change in `service.version` is recorded as a deploy; the first time a service is seen is only a baseline, so connecting a service never invents a deploy. `pagerlens.depends_on` declares dependencies.
+- Metrics: gauges are stored as they are, monotonic cumulative sums become a per-second `<name>_rate`, and histograms become `<name>_p95`. Attributes are not kept, so series that differ only by attributes collapse into one. To feed the built-in rules, name metrics like the ones listed under [Send your own telemetry](#send-your-own-telemetry); the agent does this for you.
+
+### The pull agent
+
+`pagerlens-agent` reads a YAML file ([`agent.example.yaml`](agent.example.yaml)) and, every interval, for each target:
+
+- **HTTP probes** (`up`, `error_rate`, `latency_p95_ms`). Every failure is also logged as an error line, so the investigator has evidence. After `after_failures` failures in a row it raises an alert and opens an incident.
+- **Prometheus scraping** of `/metrics` with the `http-standard` preset: `request_rate`, `error_rate`, `latency_p95_ms`, `cpu_pct`, `mem_pct`, `db_up`, and a deploy whenever the `app_info` version changes.
+- **AgentPG sandbox status** (experimental; needs the `agentpg` CLI logged in on that machine): detects an auto-paused sandbox and reports `SandboxNotRunning`.
+
+```bash
+pip install git+https://github.com/elchinoo/PagerLens   # not on PyPI; or from a checkout: pip install -e .
+                                           # or run the container image with --entrypoint pagerlens-agent
+export PAGERLENS_TOKEN=<ingest token>
+pagerlens-agent once agent.yaml --dry-run  # one cycle, prints what would be sent
+pagerlens-agent run agent.yaml
+```
+
+Secrets are only ever read from the environment variables named in the config; URLs with embedded credentials are refused; redirects are not followed; a rejected token stops the agent with a clear message and without printing the token; unsent data is kept in a bounded in-memory buffer and retried. Run it on your laptop, a VM or CI. Putting it in a sandbox means passing the token with `--env`, which is not a secret store, so prefer a place where you control the environment.
+
+### `/metrics`
+
+PagerLens, TrustDesk and CityPulse expose Prometheus metrics at `/metrics` with the same names (`http_requests_total`, `http_request_duration_seconds`, `db_up`, `app_info`, `process_*`). The endpoint needs a **Metrics** token, which can read nothing else and is refused on `/mcp`.
+
 ## How secrets are handled
 
 Files full of credentials are the usual way these tools leak, so PagerLens avoids them:
@@ -135,7 +183,7 @@ Files full of credentials are the usual way these tools leak, so PagerLens avoid
 |---|---|---|
 | **Admin password** | Entered once in the browser (first run needs the setup code from the server log) | Stored only as a salted **scrypt** hash. |
 | **Browser session** | An `HttpOnly`, `SameSite=Strict` cookie (`Secure` over HTTPS) | Random value, only its SHA-256 stored server-side, 12-hour expiry. State-changing browser requests also need a custom header. |
-| **API tokens** | Created in **Settings**, shown **once** | Only a SHA-256 hash is stored. Revocable. Scopes: `read` (list and read), `ingest` (push telemetry, read nothing, no MCP) and `full`. |
+| **API tokens** | Created in **Settings**, shown **once** | Only a SHA-256 hash is stored. Revocable. Scopes: `read` (list and read), `ingest` (push telemetry, read nothing, no MCP), `metrics` (scrape `/metrics` only) and `full`. |
 | **Provider API keys** (for the AI methods) | Entered in **Settings** | Encrypted (Fernet) with a random data key that your admin password wraps. The database alone reveals nothing; never returned by the API or logged. |
 
 After a **restart** stored provider keys are locked until you sign in. `pagerlens reset-admin` is the only recovery from a lost password and it deletes the stored keys. See [SECURITY.md](SECURITY.md) for the full model and its limits.

@@ -11,7 +11,7 @@ from . import retrieval
 
 BASE_FROM, BASE_TO = timedelta(minutes=85), timedelta(minutes=35)   # baseline window, before the anchor
 CUR_FROM = timedelta(minutes=10)                                       # "now" window
-METRICS = ("error_rate", "latency_p95_ms", "request_rate", "cpu_pct", "mem_pct", "db_connections")
+METRICS = ("error_rate", "latency_p95_ms", "request_rate", "cpu_pct", "mem_pct", "db_connections", "up", "sandbox_running", "db_up")
 MAX_ROWS = 10
 
 
@@ -83,9 +83,21 @@ def _series(ctx: Ctx, service_id: int, metric: str, start: datetime, end: dateti
         (service_id, metric, start, end))]
 
 
+BINARY = ("up", "sandbox_running", "db_up")   # 1 = healthy, 0 = not: meaningful even with no history
+
+
 def _compare(ctx: Ctx, service_id: int, metric: str) -> dict | None:
     base = [v for _, v in _series(ctx, service_id, metric, ctx.anchor - BASE_FROM, ctx.anchor - BASE_TO)]
     cur_series = _series(ctx, service_id, metric, ctx.anchor - CUR_FROM, ctx.anchor)
+    if metric in BINARY and cur_series:
+        # Health state is judged on the most recent samples: an outage 15 seconds old must not be averaged away by
+        # ten minutes of earlier good checks. A newly monitored service has no baseline, and "0% pass" needs none.
+        recent = [v for _, v in cur_series][-3:]
+        mean = statistics.fmean(recent)
+        earlier = [v for _, v in cur_series][:-3] + base
+        return {"baseline_mean": round(statistics.fmean(earlier), 2) if earlier else 1.0, "current_mean": round(mean, 2),
+                "current_max": round(max(recent), 2), "ratio": round(mean, 2), "z": round(-99.0 if mean < 0.5 else 0.0, 1),
+                "slope_per_min": 0.0, "onset": None, "no_baseline": len(earlier) < 3}
     if len(base) < 5 or len(cur_series) < 3:
         return None
     cur = [v for _, v in cur_series]

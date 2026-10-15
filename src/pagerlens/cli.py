@@ -87,6 +87,18 @@ def _chat_cfg(conn, mode: str, account: str | None):
     return cfg
 
 
+def _ensure_runbooks() -> None:
+    """Runbooks are reference material, not demo data: make sure they exist even when the Lab is never used."""
+    from . import simulator
+    from .db import connect_vector
+
+    with connect_vector() as conn:
+        added = simulator.seed_runbooks(conn)
+        conn.commit()
+    if added:
+        print(f"runbooks added: {added}")
+
+
 def _seed() -> None:
     from . import simulator
     from .db import connect_vector
@@ -122,6 +134,7 @@ def _start() -> int:
               "  agentpg extensions create <instance-id> pg_trgm", file=sys.stderr)
         return 1
     print("migrations applied:", ", ".join(applied) if applied else "none (up to date)")
+    _ensure_runbooks()
     if os.environ.get("AUTO_SEED", "").lower() in {"1", "true", "yes"}:
         from .db import connect
 

@@ -18,6 +18,7 @@ affected version or commit.
 - API tokens are random, shown once, stored as SHA-256 hashes, revocable, and have one of three scopes.
   `read` tokens can read incidents, reports and telemetry but cannot change data or manage accounts. `ingest`
   tokens can only push logs, metrics, deploys, services and alerts: they read nothing and are refused on `/mcp`.
+  `metrics` tokens can only read `/metrics`: they read no incident data and are refused on `/mcp`.
   `full` tokens can do everything an admin session can.
 - `/mcp` accepts `read` and `full` bearer tokens only, never browser cookies. The tools that change state
   (`investigate`, `add_note`, `mark_root_cause`) re-validate the caller's own token inside the tool, so a
@@ -28,6 +29,15 @@ affected version or commit.
   process). Behind a reverse proxy all clients can share one address, so add proxy-level limits too.
 - With no credential configured the app **denies everything**. Anonymous access exists only behind the explicit
   opt-in `PAGERLENS_ALLOW_ANONYMOUS=true`; never use it on a reachable host.
+
+**Collection paths**
+- `/v1/logs`, `/v1/metrics` and `/v1/traces` (OTLP/HTTP) need an `ingest` token and go through the same validation and
+  scrubbing as the ingest API. Request bodies are capped at 2 MB and gzip bodies are inflated with a hard 8 MB limit
+  (a decompression bomb is rejected with `400`). Unknown encodings and content types are refused.
+- `/metrics` needs a `metrics` token and exposes route templates, never raw paths, so identifiers cannot leak into labels.
+- `pagerlens-agent` reads secrets only from the environment variables its config names, refuses URLs with embedded
+  credentials, never follows redirects, never prints a token, and sends each target its own token only to that target.
+  The agent's `agentpg` collector runs the CLI with a validated sandbox id and no shell.
 
 **Provider API keys**
 - Encrypted at rest with Fernet using a random 256-bit data key. The data key is stored only *wrapped*

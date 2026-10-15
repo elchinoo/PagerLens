@@ -114,7 +114,7 @@ async function renderSecurity() {
   try { [tokens, session] = await Promise.all([api("/api/tokens"), api("/api/session")]); } catch (err) { box.replaceChildren(h("p", { class: "error" }, err.message)); return; }
   const reveal = h("div", { hidden: true });
   const tName = h("input", { id: "tk-name", maxlength: "60", required: true, placeholder: "e.g. Claude Code on my laptop" });
-  const tScope = h("select", { id: "tk-scope" }, h("option", { value: "read" }, "Read-only (list and read incidents; recommended for MCP)"), h("option", { value: "ingest" }, "Ingest only (push logs, metrics, deploys and alerts; reads nothing)"), h("option", { value: "full" }, "Full access"));
+  const tScope = h("select", { id: "tk-scope" }, h("option", { value: "read" }, "Read-only (list and read incidents; recommended for MCP)"), h("option", { value: "ingest" }, "Ingest only (push logs, metrics, deploys and alerts; reads nothing)"), h("option", { value: "metrics" }, "Metrics only (scrape /metrics; reads nothing else)"), h("option", { value: "full" }, "Full access"));
   const tErr = h("p", { class: "error", role: "alert" });
   const tokenForm = h("form", { class: "grid-inline", onsubmit: async (e) => {
     e.preventDefault();

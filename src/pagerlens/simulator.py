@@ -192,6 +192,19 @@ RUNBOOKS = [
      "Symptoms: 'x509: certificate has expired' or handshake failures, an abrupt step change in errors with no deploy "
      "and normal resource use. Identify the host in the message, renew and deploy the certificate, then restart "
      "clients that cache the old one. Add expiry alerts 30 days ahead."),
+    ("Service stopped answering health checks", "service_down", None,
+     "Symptoms: health probes fail with connection errors or timeouts, up drops to 0. Check whether the process or "
+     "container is running and why it exited (logs, exit code, OOM kill), whether a recent deploy or config change "
+     "preceded it, and whether the network path or DNS changed. Restart or roll back, then confirm probes recover."),
+    ("Sandbox paused or stopped by the platform", "sandbox_paused", None,
+     "Symptoms: every URL returns an empty 503 from the platform, the sandbox status is paused, and no application "
+     "headers appear. Free-tier sandboxes auto-pause when idle and do not wake on a request. Resume it "
+     "(for AgentPG: agentpg sandbox resume <sandbox-id>), then unlock stored provider keys in the app. Ask the "
+     "platform whether auto-pause can be disabled on your plan."),
+    ("Database unreachable while the service is up", "database_unreachable", None,
+     "Symptoms: db_up is 0 and readiness fails (waking-database) while health checks still pass. The database may be "
+     "scaled to zero, paused, or unreachable from the service. Check the instance status, credentials and network "
+     "rules, wait for a waking database, and confirm connections recover."),
 ]
 
 

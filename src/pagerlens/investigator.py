@@ -26,6 +26,8 @@ _POOL = re.compile(r"pool|too many connections|timeout acquiring connection|conn
 _OOM = re.compile(r"OutOfMemory|OOMKilled|heap space|out of memory", re.I)
 _CERT = re.compile(r"x509|certificate (has )?expired|certificate verify|tls handshake|ssl.*(expired|verify)", re.I)
 _QUEUE = re.compile(r"queue depth|backlog|rate limit", re.I)
+_PROBE = re.compile(r"health probe failed|metrics scrape failed", re.I)
+_PAUSED = re.compile(r"sandbox is (paused|stopped|suspended)", re.I)
 _TIMEOUT = re.compile(r"timeout|timed out|unavailable|connection refused|upstream", re.I)
 
 
@@ -48,6 +50,13 @@ class Hyp:
     def refute(self, obs: int, weight: float, note: str) -> None:
         self.score -= weight
         self.evidence.append((obs, "refutes", note))
+
+
+def _state_note(what: str, m: dict) -> str:
+    """Describe a 0/1 health signal, saying so when there was no earlier history to compare with."""
+    if m.get("no_baseline"):
+        return f"{what} only {m['current_mean']:.0%} of the time recently (no earlier history to compare)"
+    return f"{what} {m['baseline_mean']:.0%} of the time before, but only {m['current_mean']:.0%} now"
 
 
 def _hypotheses(S: str, targets: list[str], M: dict, SIG: dict, DEP: dict, onset: datetime | None) -> list[Hyp]:
@@ -137,6 +146,34 @@ def _hypotheses(S: str, targets: list[str], M: dict, SIG: dict, DEP: dict, onset
         if DEP[dep][0]["deploys"]:
             h.refute(DEP[dep][1], 0.1, f"{dep} was also deployed recently, so the cause may be that release")
         out.append(h)
+
+    # --- the service stopped answering: platform pause, crash/network, or its database -----------------------------------
+    for svc in targets:
+        up, sbx, dbu = metric(svc, "up"), metric(svc, "sandbox_running"), metric(svc, "db_up")
+        probe = next((s for s in sigs(svc) if _PROBE.search(s["signature"])), None)
+        paused = next((s for s in sigs(svc) if _PAUSED.search(s["signature"])), None)
+        if sbx and sbx["current_mean"] <= 0.5:
+            h = Hyp("sandbox_paused", svc, f"The platform paused or stopped the sandbox running {svc}")
+            h.support(M[svc][1], 0.6, _state_note("the platform reports the sandbox as running", sbx))
+            if paused:
+                h.support(SIG[svc][1], 0.25, f"the platform status says: '{paused['signature'][:80]}'")
+            out.append(h)
+        if up and up["current_mean"] <= 0.5:
+            h = Hyp("service_down", svc, f"{svc} stopped answering health checks")
+            h.support(M[svc][1], 0.55, _state_note("health probes succeed", up))
+            if probe:
+                h.support(SIG[svc][1], 0.2, f"{probe['count']} failed probes: '{probe['signature'][:80]}'")
+                if re.search(r"ConnectError|connection error|refused", probe["signature"], re.I):
+                    h.support(SIG[svc][1], 0.1, "connections are refused or unreachable: the process is down or the network path is broken")
+                elif re.search(r"HTTP 5", probe["signature"]):
+                    h.support(SIG[svc][1], 0.05, "the service answers but reports itself unhealthy")
+            if sbx and sbx["current_mean"] <= 0.5:
+                h.refute(M[svc][1], 0.15, "the platform reports the sandbox is not running, which explains the failed probes")
+            out.append(h)
+        if dbu and dbu["current_mean"] <= 0.5 and not (up and up["current_mean"] <= 0.5):
+            h = Hyp("database_unreachable", svc, f"{svc} is running but cannot reach its database")
+            h.support(M[svc][1], 0.6, _state_note("the database is reachable", dbu) + " while the service itself still answers")
+            out.append(h)
 
     # --- traffic spike -------------------------------------------------------------------------------------------------------
     for svc in targets:

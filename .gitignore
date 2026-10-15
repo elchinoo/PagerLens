@@ -11,3 +11,4 @@ dist/
 api_key
 *.key
 *.pem
+agent.yaml

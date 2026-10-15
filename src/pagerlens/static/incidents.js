@@ -6,6 +6,7 @@ import { $, fill, h, setBusy, toast } from "/static/ui.js";
 const CATEGORY_NAMES = {
   bad_deploy: "Bad deploy", db_saturation: "Database saturation", resource_exhaustion: "Resource exhaustion",
   dependency_outage: "Dependency outage", traffic_spike: "Traffic spike", expired_certificate: "Expired certificate",
+  service_down: "Service down", sandbox_paused: "Sandbox paused", database_unreachable: "Database unreachable",
 };
 const when = (s) => (s ? new Date(s).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "");
 const SOURCE_NAMES = { rules: "rules", llm: "AI", both: "rules + AI" };

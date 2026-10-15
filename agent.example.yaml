@@ -1,0 +1,34 @@
+# pagerlens-agent configuration. Copy to agent.yaml (git-ignored) and edit.
+# Secrets are never written here: token_env names an ENVIRONMENT VARIABLE that holds the secret.
+#
+#   export PAGERLENS_TOKEN=<an INGEST token created in PagerLens Settings>
+#   export TRUSTDESK_METRICS=<a METRICS token created in TrustDesk Settings>
+#   pagerlens-agent once agent.yaml --dry-run     # print what would be sent, send nothing
+#   pagerlens-agent run  agent.yaml               # watch forever
+
+pagerlens:
+  url: https://your-pagerlens.example      # base URL of PagerLens
+  token_env: PAGERLENS_TOKEN
+interval_seconds: 30
+
+targets:
+  - name: trustdesk                        # becomes the service name in PagerLens
+    tier: standard
+    description: Security questionnaire knowledge base
+    depends_on: []                         # services this one calls; lets PagerLens tell a victim from a cause
+    probes:                                # black-box health checks from outside
+      - url: https://your-trustdesk.example/healthz
+        timeout: 10
+    scrape:                                # Prometheus /metrics (TrustDesk, PagerLens and CityPulse share metric names)
+      - url: https://your-trustdesk.example/metrics
+        token_env: TRUSTDESK_METRICS
+        mem_limit_mb: 512                  # optional: turns process memory into mem_pct
+    alert:                                 # open an incident after this many failed checks in a row
+      after_failures: 3
+      name: ServiceDown
+      severity: sev2
+
+  # Experimental: needs the agentpg CLI logged in on this machine. Detects an auto-paused sandbox.
+  # - name: trustdesk
+  #   agentpg:
+  #     - sandbox_id: sbx-0123456789ab
