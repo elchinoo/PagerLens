@@ -11,7 +11,10 @@ from . import retrieval
 
 BASE_FROM, BASE_TO = timedelta(minutes=85), timedelta(minutes=35)   # baseline window, before the anchor
 CUR_FROM = timedelta(minutes=10)                                       # "now" window
-METRICS = ("error_rate", "latency_p95_ms", "request_rate", "cpu_pct", "mem_pct", "db_connections", "up", "sandbox_running", "db_up")
+METRICS = ("error_rate", "latency_p95_ms", "request_rate", "cpu_pct", "mem_pct", "db_connections", "up", "sandbox_running", "db_up",
+           # sensor fleets and collection pipelines (CityPulse and similar)
+           "ingest_rate", "overloaded_pct", "reject_pct", "fleet_health_pct", "offline_pct", "stale_pct", "fault_pct",
+           "stuck_pct", "worst_district_pct")
 MAX_ROWS = 10
 
 
@@ -84,6 +87,10 @@ def _series(ctx: Ctx, service_id: int, metric: str, start: datetime, end: dateti
 
 
 BINARY = ("up", "sandbox_running", "db_up")   # 1 = healthy, 0 = not: meaningful even with no history
+# Shares (0..100) that mean something on their own: "40% of sensors offline" needs no baseline to be alarming.
+LEVELS = ("latency_p95_ms", "ingest_rate")   # judged on their level when there is no baseline yet
+ABSOLUTE = {"overloaded_pct": 0.0, "reject_pct": 0.0, "fleet_health_pct": 100.0, "offline_pct": 0.0, "stale_pct": 0.0,
+            "fault_pct": 0.0, "stuck_pct": 0.0, "worst_district_pct": 100.0}
 
 
 def _compare(ctx: Ctx, service_id: int, metric: str) -> dict | None:
@@ -98,6 +105,18 @@ def _compare(ctx: Ctx, service_id: int, metric: str) -> dict | None:
         return {"baseline_mean": round(statistics.fmean(earlier), 2) if earlier else 1.0, "current_mean": round(mean, 2),
                 "current_max": round(max(recent), 2), "ratio": round(mean, 2), "z": round(-99.0 if mean < 0.5 else 0.0, 1),
                 "slope_per_min": 0.0, "onset": None, "no_baseline": len(earlier) < 3}
+    if metric in ABSOLUTE and cur_series:
+        recent = [v for _, v in cur_series][-3:]
+        earlier = [v for _, v in cur_series][:-3] + base
+        mean = statistics.fmean(recent)
+        return {"baseline_mean": round(statistics.fmean(earlier), 2) if len(earlier) >= 3 else ABSOLUTE[metric],
+                "current_mean": round(mean, 2), "current_max": round(max(recent), 2), "ratio": None, "z": 0.0,
+                "slope_per_min": 0.0, "onset": None, "no_baseline": len(earlier) < 3}
+    if metric in LEVELS and len(base) < 5 and len(cur_series) >= 3:
+        # A newly monitored service has no baseline, but a gateway taking 2.5 s per batch is slow whatever it did before.
+        cur = [v for _, v in cur_series]
+        return {"baseline_mean": 0.0, "current_mean": round(statistics.fmean(cur[-3:]), 2), "current_max": round(max(cur), 2),
+                "ratio": None, "z": 0.0, "slope_per_min": 0.0, "onset": None, "no_baseline": True}
     if len(base) < 5 or len(cur_series) < 3:
         return None
     cur = [v for _, v in cur_series]

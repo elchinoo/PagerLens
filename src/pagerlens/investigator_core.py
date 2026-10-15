@@ -17,6 +17,9 @@ CATEGORIES = {
     "service_down": "A service stopped answering health checks",
     "sandbox_paused": "The hosting platform paused or stopped the sandbox",
     "database_unreachable": "The service is up but its database is unreachable",
+    "ingest_overload": "The collection tier is saturated and refusing or delaying data",
+    "sensor_fleet_outage": "A group of sensors stopped reporting",
+    "data_quality": "Sensors are sending bad data (rejected, out-of-range or frozen readings)",
     "unknown": "Not enough evidence",
 }
 

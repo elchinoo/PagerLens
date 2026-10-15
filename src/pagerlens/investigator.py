@@ -207,6 +207,66 @@ def _hypotheses(S: str, targets: list[str], M: dict, SIG: dict, DEP: dict, onset
                 timedelta(minutes=-3) <= onset - _dt(d["deployed_at"]) <= timedelta(minutes=15) for d in DEP[svc][0]["deploys"]):
             h.refute(DEP[svc][1], 0.2, "a deploy happened right before the onset, so the release is also a suspect")
         out.append(h)
+    # --- sensor fleets and collection pipelines: overload, silent sensors, bad data ------------------------------------
+    fleet = [svc for svc in targets if metric(svc, "fleet_health_pct")]
+    for svc in targets:
+        ov, lat, rate = metric(svc, "overloaded_pct"), metric(svc, "latency_p95_ms"), metric(svc, "ingest_rate")
+        if not ov:   # only a collection tier reports overloaded_pct
+            continue
+        refusing = ov["current_mean"] >= 5
+        slow = bool(lat) and (lat["current_mean"] >= 1000 or bool(lat["ratio"] and lat["ratio"] >= 3 and lat["z"] >= 4))
+        if not (refusing or slow):
+            continue
+        h = Hyp("ingest_overload", svc, f"{svc} is saturated and refusing or delaying incoming data")
+        m_obs = M[svc][1]
+        if refusing:
+            h.support(m_obs, 0.6, f"{svc} refused {ov['current_mean']:.0f}% of recent batches as overloaded")
+        if slow:
+            h.support(m_obs, 0.15 if refusing else 0.5,
+                      f"p95 batch latency is {lat['current_mean']:.0f} ms"
+                      + ("" if lat.get("no_baseline") else f" (baseline {lat['baseline_mean']:.0f} ms)")
+                      + ("" if refusing else ": it is accepting data but too slowly to keep up"))
+        if rate and rate["ratio"] and rate["ratio"] >= 2 and rate["z"] >= 4:
+            h.support(m_obs, 0.1, f"the ingest rate is x{rate['ratio']} its baseline: the senders are flooding it")
+        for f in fleet:
+            late = (metric(f, "stale_pct") or {}).get("current_mean", 0) + (metric(f, "offline_pct") or {}).get("current_mean", 0)
+            if late >= 5:
+                h.support(M[f][1], 0.15, f"{late:.0f}% of {f}'s sensors look silent because their data is delayed behind the overload")
+                break
+        out.append(h)
+
+    for svc in targets:
+        off, health, worst = metric(svc, "offline_pct"), metric(svc, "fleet_health_pct"), metric(svc, "worst_district_pct")
+        if not off or off["current_mean"] < 5:
+            continue
+        h = Hyp("sensor_fleet_outage", svc, f"A group of sensors behind {svc} stopped reporting")
+        h.support(M[svc][1], 0.5, f"{off['current_mean']:.0f}% of the sensors are offline")
+        if health and health["current_mean"] < 85:
+            h.support(M[svc][1], 0.1, f"fleet health is down to {health['current_mean']:.0f}%")
+        if worst and health and worst["current_mean"] <= 50 and health["current_mean"] - worst["current_mean"] >= 25:
+            h.support(M[svc][1], 0.2, f"one district is at {worst['current_mean']:.0f}% healthy while the whole fleet is at "
+                                      f"{health['current_mean']:.0f}%: the loss is regional (power, backhaul or a gateway)")
+        for other in targets:
+            ov = metric(other, "overloaded_pct")
+            if other != svc and ov and ov["current_mean"] >= 5:
+                h.refute(M[other][1], 0.15, f"{other} is refusing batches ({ov['current_mean']:.0f}% overloaded), "
+                                            "so some silence may be effect, not cause")
+        out.append(h)
+
+    quality = []   # the symptoms live on different services (rejects at the gateway, faults on the fleet): one hypothesis
+    for svc in targets:
+        for name, weight, text in (("reject_pct", 0.25, "{:.0f}% of incoming readings were rejected as malformed"),
+                                   ("fault_pct", 0.25, "{:.0f}% of sensors report values outside their physical limits"),
+                                   ("stuck_pct", 0.2, "{:.0f}% of sensors repeat the same value (frozen)")):
+            m = metric(svc, name)
+            if m and m["current_mean"] >= 3:
+                quality.append((M[svc][1], weight, text.format(m["current_mean"])))
+    if quality:
+        h = Hyp("data_quality", S, f"Sensors behind {S} are sending bad data")
+        h.score = 0.15   # a symptom alone is a hint, several together are a diagnosis
+        for obs, weight, note in quality:
+            h.support(obs, weight, note)
+        out.append(h)
     return out
 
 

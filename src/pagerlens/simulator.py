@@ -205,6 +205,20 @@ RUNBOOKS = [
      "Symptoms: db_up is 0 and readiness fails (waking-database) while health checks still pass. The database may be "
      "scaled to zero, paused, or unreachable from the service. Check the instance status, credentials and network "
      "rules, wait for a waking database, and confirm connections recover."),
+    ("Collection tier overloaded", "ingest_overload", None,
+     "Symptoms: the ingest gateway answers 429 or times out, p95 batch latency climbs, senders buffer and their data "
+     "arrives late so sensors look stale. Check for a flood (a misconfigured sender, a retry storm) versus a slow "
+     "database, add gateway replicas or raise the write concurrency, ask noisy senders to back off, and confirm the "
+     "senders' buffers drain. Watch the buffer size: when it is full, data is dropped."),
+    ("Sensors stopped reporting", "sensor_fleet_outage", None,
+     "Symptoms: a share of sensors is offline. If one district is dark while the rest is healthy, suspect shared "
+     "infrastructure there: power, a backhaul link or a local gateway. If the loss is spread out, suspect the "
+     "collection path or a credential that expired. Check the last-seen times, the local gateway and the senders' "
+     "logs, restore the link, and confirm sensors report again."),
+    ("Sensors sending bad data", "data_quality", None,
+     "Symptoms: many readings rejected, values outside physical limits, or sensors repeating the same value. "
+     "Identify which types and districts are affected, check for a firmware release, a calibration drift or a "
+     "failing power supply, quarantine the affected sensors from downstream decisions, and roll back or recalibrate."),
 ]
 
 
