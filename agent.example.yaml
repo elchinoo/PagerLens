@@ -3,6 +3,7 @@
 #
 #   export PAGERLENS_TOKEN=<an INGEST token created in PagerLens Settings>
 #   export TRUSTDESK_METRICS=<a METRICS token created in TrustDesk Settings>
+#   (and CITYPULSE_METRICS, CPSIM_METRICS, PAGERLENS_METRICS for the other targets below)
 #   pagerlens-agent once agent.yaml --dry-run     # print what would be sent, send nothing
 #   pagerlens-agent run  agent.yaml               # watch forever
 
@@ -27,6 +28,40 @@ targets:
       after_failures: 3
       name: ServiceDown
       severity: sev2
+
+  # --- the rest of the family: CityPulse (the platform) and CityPulse Simulator (its field side) ---
+  - name: citypulse-ingest
+    tier: critical
+    description: CityPulse ingest gateway
+    probes:
+      - url: https://your-citypulse.example/healthz
+        timeout: 10
+    scrape:
+      - url: https://your-citypulse.example/metrics
+        token_env: CITYPULSE_METRICS       # a "metrics" token created in CityPulse Settings
+    alert: {after_failures: 3, name: ServiceDown, severity: sev1}
+
+  - name: citypulse-simulator
+    tier: standard
+    description: CityPulse Simulator (field devices and edge gateway)
+    depends_on: [citypulse-ingest]
+    probes:
+      - url: https://your-simulator.example/healthz
+        timeout: 10
+    scrape:
+      - url: https://your-simulator.example/metrics
+        token_env: CPSIM_METRICS           # the value of CPSIM_METRICS_TOKEN set on the simulator
+    alert: {after_failures: 3, name: ServiceDown, severity: sev3}
+
+  - name: pagerlens                         # PagerLens can watch itself; use a second PagerLens or accept that it cannot report its own outage
+    tier: standard
+    probes:
+      - url: https://your-pagerlens.example/healthz
+        timeout: 10
+    scrape:
+      - url: https://your-pagerlens.example/metrics
+        token_env: PAGERLENS_METRICS
+    alert: {after_failures: 3, name: ServiceDown, severity: sev3}
 
   # Experimental: needs the agentpg CLI logged in on this machine. Detects an auto-paused sandbox.
   # - name: trustdesk
