@@ -10,12 +10,12 @@
 </head>
 <body>
 <header class="top">
-  <a class="brand" href="#incidents"><img src="/static/logo.svg" alt="" width="34" height="34"><span>PagerLens</span></a>
+  <a class="brand" href="#dashboard"><img src="/static/logo.svg" alt="" width="34" height="34"><span>PagerLens</span></a>
   <nav id="nav" class="tabs" hidden>
+    <a href="#dashboard" data-tab="dashboard">Dashboard</a>
     <a href="#incidents" data-tab="incidents">Incidents</a>
-    <a href="#fleet" data-tab="fleet">Fleet</a>
-    <a href="#lab" data-tab="lab">Lab</a>
     <a href="#runbooks" data-tab="runbooks">Runbooks</a>
+    <a href="#lab" data-tab="lab">Lab</a>
     <a href="#settings" data-tab="settings">Settings</a>
     <a href="#connect" data-tab="connect">Connect</a>
   </nav>
@@ -26,10 +26,11 @@
   <section id="auth-card" class="card narrow" hidden></section>
   <div id="vault-banner" class="banner vault" hidden></div>
 
+  <section id="view-dashboard" hidden></section>
+  <section id="view-service" hidden></section>
   <section id="view-incidents" hidden></section>
-  <section id="view-fleet" hidden></section>
-  <section id="view-lab" hidden></section>
   <section id="view-runbooks" hidden></section>
+  <section id="view-lab" hidden></section>
 
   <section id="view-settings" hidden>
     <h1>Settings</h1>

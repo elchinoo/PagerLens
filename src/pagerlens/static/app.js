@@ -1,15 +1,16 @@
 import { api } from "/static/api.js";
 import { initConnect } from "/static/connect.js";
-import { initFleet } from "/static/fleet.js";
+import { initDashboard, stopDashboard } from "/static/dashboard.js";
 import { initIncidents } from "/static/incidents.js";
 import { initLab } from "/static/lab.js";
 import { initRunbooks } from "/static/runbooks.js";
+import { initService, stopService } from "/static/service.js";
 import { initSettings } from "/static/settings.js";
 import { refreshSession, renderLogin, renderSetup, renderVaultBanner, state } from "/static/session.js";
 import { $, h } from "/static/ui.js";
 
-const TABS = ["incidents", "fleet", "lab", "runbooks", "settings", "connect"];
-const INIT = { incidents: initIncidents, fleet: initFleet, lab: initLab, runbooks: initRunbooks, settings: initSettings, connect: initConnect };
+const TABS = ["dashboard", "service", "incidents", "runbooks", "lab", "settings", "connect"];
+const INIT = { dashboard: initDashboard, service: initService, incidents: initIncidents, lab: initLab, runbooks: initRunbooks, settings: initSettings, connect: initConnect };
 const SECTIONS = ["auth-card", "vault-banner", "nav", "signout", ...TABS.map((t) => "view-" + t)];
 
 function hideAll() { for (const id of SECTIONS) $(id).hidden = true; }
@@ -44,11 +45,15 @@ function showApp() {
 
 function route() {
   if (!state.session || state.session.state !== "logged_in") return;
-  const [name, arg] = location.hash.slice(1).split("/");
-  const tab = TABS.includes(name) ? name : "incidents";
+  const [rawName, arg] = location.hash.slice(1).split("/");
+  const name = rawName === "fleet" ? "dashboard" : rawName;      // the old Fleet tab became the dashboard
+  const tab = TABS.includes(name) ? name : "dashboard";
+  if (tab !== "dashboard") stopDashboard();
+  if (tab !== "service") stopService();
   for (const t of TABS) $("view-" + t).hidden = t !== tab;
-  for (const a of document.querySelectorAll("#nav a")) a.classList.toggle("active", a.dataset.tab === tab);
-  INIT[tab](tab === "incidents" && /^\d+$/.test(arg || "") ? Number(arg) : undefined);
+  const navTab = tab === "service" ? "dashboard" : tab;           // a service page belongs to the Dashboard tab
+  for (const a of document.querySelectorAll("#nav a")) a.classList.toggle("active", a.dataset.tab === navTab);
+  INIT[tab](tab === "incidents" && /^\d+$/.test(arg || "") ? Number(arg) : tab === "service" ? decodeURIComponent(arg || "") : undefined);
 }
 
 $("signout").addEventListener("click", async () => {

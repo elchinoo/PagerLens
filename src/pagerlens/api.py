@@ -14,6 +14,7 @@ from . import (
     __version__,
     accounts,
     auth,
+    dashboard,
     embedcfg,
     incidents,
     ingest,
@@ -671,6 +672,24 @@ def prometheus_metrics():
 def get_fleet():
     with connect() as conn:
         return {"services": incidents.fleet(conn)}
+
+
+@app.get("/api/dashboard", dependencies=[Depends(require("read"))])
+def get_dashboard():
+    """Every monitored service with its verdict and sparklines (see dashboard.py)."""
+    with _translate(), connect() as conn:
+        return dashboard.overview(conn)
+
+
+@app.get("/api/services/{name}", dependencies=[Depends(require("read"))])
+def get_service(name: str, minutes: int = Query(60, ge=5, le=1440)):
+    if not ingest.NAME.match(name):
+        raise HTTPException(404, "no such service")
+    with _translate(), connect() as conn:
+        detail = dashboard.service_detail(conn, name, minutes)
+    if detail is None:
+        raise HTTPException(404, "no such service")
+    return detail
 
 
 @app.get("/api/incidents", dependencies=[Depends(require("read"))])
