@@ -1,4 +1,4 @@
-import { api } from "/static/api.js";
+import { api } from "/kit/api.js";
 import { initConnect } from "/static/connect.js";
 import { initDashboard, stopDashboard } from "/static/dashboard.js";
 import { initIncidents } from "/static/incidents.js";
@@ -6,8 +6,8 @@ import { initLab } from "/static/lab.js";
 import { initRunbooks } from "/static/runbooks.js";
 import { initService, stopService } from "/static/service.js";
 import { initSettings } from "/static/settings.js";
-import { refreshSession, renderLogin, renderSetup, renderVaultBanner, state } from "/static/session.js";
-import { $, h } from "/static/ui.js";
+import { can, refreshSession, renderLogin, renderSetup, renderVaultBanner, state } from "/kit/session.js";
+import { $, h } from "/kit/ui.js";
 
 const TABS = ["dashboard", "service", "incidents", "runbooks", "lab", "settings", "connect"];
 const INIT = { dashboard: initDashboard, service: initService, incidents: initIncidents, lab: initLab, runbooks: initRunbooks, settings: initSettings, connect: initConnect };
@@ -30,13 +30,17 @@ async function boot(notice = "") {
   hideAll();
   let s;
   try { s = await refreshSession(); } catch (err) { showUnavailable(err); return; }
-  if (s.state === "setup_required") renderSetup(() => boot());
-  else if (s.state === "logged_out") renderLogin(() => boot(), notice);
+  if (s.state === "setup_required") renderSetup(() => boot(), "PagerLens");
+  else if (s.state === "logged_out") renderLogin(() => boot(), notice, "PagerLens");
   else showApp();
 }
 
+// What each tab needs; the server enforces it, this only hides what a role would be refused.
+const NEEDS = { dashboard: "dashboard:read", service: "dashboard:read", incidents: "incidents:read", runbooks: "runbooks:read", lab: "simulator:run", settings: "settings:manage", connect: "mcp:use" };
+
 function showApp() {
   $("auth-card").hidden = true;
+  for (const a of document.querySelectorAll("#nav a")) a.hidden = !can(NEEDS[a.dataset.tab]);
   $("nav").hidden = false;
   $("signout").hidden = false;
   renderVaultBanner();
@@ -47,7 +51,8 @@ function route() {
   if (!state.session || state.session.state !== "logged_in") return;
   const [rawName, arg] = location.hash.slice(1).split("/");
   const name = rawName === "fleet" ? "dashboard" : rawName;      // the old Fleet tab became the dashboard
-  const tab = TABS.includes(name) ? name : "dashboard";
+  const allowed = TABS.filter((t) => can(NEEDS[t]));
+  const tab = allowed.includes(name) ? name : (allowed[0] || "dashboard");
   if (tab !== "dashboard") stopDashboard();
   if (tab !== "service") stopService();
   for (const t of TABS) $("view-" + t).hidden = t !== tab;
@@ -57,19 +62,21 @@ function route() {
 }
 
 $("signout").addEventListener("click", async () => {
-  try { await api("/api/logout", { method: "POST" }); } catch { /* the cookie is cleared server-side regardless */ }
+  let out = {};
+  try { out = await api("/api/logout", { method: "POST" }); } catch { /* the cookie is cleared server-side regardless */ }
+  if (out.logout_url) { location.assign(out.logout_url); return; }   // also end the single sign-on session
   boot();
 });
 
 let lostTimer;
-window.addEventListener("pl-auth-lost", () => {
+window.addEventListener("apg-auth-lost", () => {
   clearTimeout(lostTimer);
   lostTimer = setTimeout(() => boot("Your session ended. Please sign in again."), 50);
 });
-window.addEventListener("pl-vault-locked", async () => {
+window.addEventListener("apg-vault-locked", async () => {
   try { await refreshSession(); renderVaultBanner(); } catch { /* ignore */ }
 });
-window.addEventListener("pl-unlocked", route);
+window.addEventListener("apg-unlocked", route);
 window.addEventListener("hashchange", route);
 
 boot();

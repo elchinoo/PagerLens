@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 dependencies = [
+  "agentpg-kit>=0.1.0",
   "fastapi>=0.115",
   "uvicorn[standard]>=0.30",
   "psycopg[binary,pool]>=3.2",
@@ -45,3 +46,7 @@ ignore = ["B008", "B905", "E501"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["E402"]
+
+# Local development: use the sibling checkout of the kit. Images install the published kit instead (see Dockerfile).
+[tool.uv.sources]
+agentpg-kit = { path = "../agentpg-kit", editable = true }

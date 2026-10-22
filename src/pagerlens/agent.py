@@ -2,8 +2,13 @@
 
 For targets that cannot push their own telemetry (or that you want watched from outside): HTTP health probes,
 Prometheus /metrics scraping, and, where this machine is logged in to AgentPG, sandbox status. Everything goes to the
-ordinary ingest API with an ingest-only token. Secrets come from environment variables named in the config, never
+ordinary ingest API with an ingest-only token, or, where the ecosystem identity provider is set up, with a token the agent
+mints itself (scope `pagerlens.ingest`, see below). Secrets come from environment variables named in the config, never
 from the file itself, and are never printed.
+
+Pushing with the identity provider instead of a hand-copied token: set PAGERLENS_AGENT_OIDC_ISSUER,
+PAGERLENS_AGENT_OIDC_CLIENT_ID and PAGERLENS_AGENT_OIDC_CLIENT_SECRET (or ..._SECRET_FILE) for a `service` client allowed the
+scope `pagerlens.ingest`. A static token (token_env) still works and wins when both are set.
 
     pagerlens-agent run  config.yaml            # loop forever
     pagerlens-agent once config.yaml --dry-run  # one cycle, print what would be sent, send nothing
@@ -20,6 +25,8 @@ from urllib.parse import urlsplit
 
 import httpx
 import yaml
+from apgkit.auth import TokenError, TokenSource
+from apgkit.config import read_secret
 from prometheus_client.parser import text_string_to_metric_families
 
 NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
@@ -263,11 +270,26 @@ def run_sandbox_status(target: Target, sb: dict, batch: Batch, runner=subprocess
 
 # ---- delivery -------------------------------------------------------------------------------------
 
+def token_source_from_env() -> TokenSource | None:
+    """A client_credentials token source when PAGERLENS_AGENT_OIDC_ISSUER / _CLIENT_ID / _CLIENT_SECRET are all set."""
+    issuer = os.environ.get("PAGERLENS_AGENT_OIDC_ISSUER", "").strip()
+    client_id = os.environ.get("PAGERLENS_AGENT_OIDC_CLIENT_ID", "").strip()
+    if not (issuer and client_id and read_secret("PAGERLENS_AGENT_OIDC_CLIENT_SECRET")):
+        return None
+    return TokenSource(issuer, client_id, lambda: read_secret("PAGERLENS_AGENT_OIDC_CLIENT_SECRET"), scope="pagerlens.ingest")
+
+
 class Pusher:
-    def __init__(self, cfg: Config, client: httpx.Client, dry_run: bool = False):
+    def __init__(self, cfg: Config, client: httpx.Client, dry_run: bool = False, source: TokenSource | None = None):
         self.cfg, self.client, self.dry = cfg, client, dry_run
         self.pending: deque = deque(maxlen=MAX_BUFFER)
-        self.headers = {"Authorization": f"Bearer {os.environ.get(cfg.token_env, '')}"}
+        static = os.environ.get(cfg.token_env, "")
+        self.source = None if static else source
+        self.headers = {"Authorization": f"Bearer {static}"}
+
+    def _headers(self) -> dict:
+        """The static token if one is set, else a (cached, refreshed) token from the identity provider."""
+        return self.source.headers() if self.source else self.headers
 
     def queue(self, path: str, body: dict) -> None:
         self.pending.append((path, body))
@@ -280,12 +302,15 @@ class Pusher:
                 print(f"[dry-run] POST {path} {str(body)[:200]}")
             else:
                 try:
-                    r = self.client.post(self.cfg.url + path, headers=self.headers, json=body, timeout=15)
+                    r = self.client.post(self.cfg.url + path, headers=self._headers(), json=body, timeout=15)
+                except TokenError as exc:
+                    print(f"could not get a token from the identity provider ({exc}); will retry", file=sys.stderr)
+                    break
                 except httpx.HTTPError as exc:
                     print(f"push failed ({type(exc).__name__}); will retry", file=sys.stderr)
                     break
                 if r.status_code in (401, 403):
-                    raise SystemExit("PagerLens rejected the token (401/403): check PAGERLENS_TOKEN and that it has the 'ingest' scope")
+                    raise SystemExit("PagerLens rejected the token (401/403): check PAGERLENS_TOKEN (an 'ingest' token) or the service client's 'pagerlens.ingest' scope")
                 if r.status_code >= 500 or r.status_code == 429:
                     print(f"push got HTTP {r.status_code}; will retry", file=sys.stderr)
                     break
@@ -347,11 +372,13 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, yaml.YAMLError, ConfigError, ValueError, TypeError) as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
-    if not args.dry_run and not os.environ.get(cfg.token_env):
-        print(f"set the environment variable {cfg.token_env} to an ingest-scope PagerLens token", file=sys.stderr)
+    source = token_source_from_env()
+    if not args.dry_run and not os.environ.get(cfg.token_env) and source is None:
+        print(f"set the environment variable {cfg.token_env} to an ingest-scope PagerLens token "
+              "(or the PAGERLENS_AGENT_OIDC_* variables to get one from the identity provider)", file=sys.stderr)
         return 2
     with _client() as client:
-        agent = Agent(cfg, client, Pusher(cfg, client, dry_run=args.dry_run))
+        agent = Agent(cfg, client, Pusher(cfg, client, dry_run=args.dry_run, source=source))
         if args.command == "once":
             agent.cycle()
             return 0

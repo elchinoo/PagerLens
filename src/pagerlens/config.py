@@ -1,6 +1,7 @@
 import os
-import sys
 from dataclasses import dataclass
+
+from apgkit.config import read_secret
 
 
 @dataclass(frozen=True)
@@ -14,23 +15,6 @@ class Settings:
     embedding_dim: int
     allow_anonymous: bool
     send_dimensions: bool
-
-
-def read_secret(env: str, default_file: str) -> str:
-    """Secret from the environment variable, else the first line of the file named by <ENV>_FILE
-    (default path given), so platforms that can only mount files can still supply it."""
-    value = os.environ.get(env, "")
-    if value:
-        return value
-    path = os.environ.get(f"{env}_FILE", default_file)
-    try:
-        with open(path) as fh:
-            return fh.readline().strip()
-    except FileNotFoundError:
-        return ""
-    except OSError as exc:  # exists but unreadable, e.g. root-only file and a non-root container user
-        print(f"WARNING: cannot read {env} file {path}: {exc.strerror}", file=sys.stderr)
-        return ""
 
 
 def _api_key() -> str:

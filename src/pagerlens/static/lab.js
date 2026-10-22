@@ -1,5 +1,5 @@
-import { api } from "/static/api.js";
-import { $, fill, h, setBusy, toast } from "/static/ui.js";
+import { api } from "/kit/api.js";
+import { $, fill, h, setBusy, toast } from "/kit/ui.js";
 
 export async function initLab() {
   const box = $("view-lab");

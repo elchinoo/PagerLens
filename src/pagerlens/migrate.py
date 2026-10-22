@@ -2,26 +2,19 @@
 from pathlib import Path
 
 from .config import get_settings
-from .db import connect
 
 MIGRATIONS = Path(__file__).resolve().parent / "migrations"
 
 
 def run() -> list[str]:
-    dim = get_settings().embedding_dim
-    applied: list[str] = []
-    with connect() as conn:
-        conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())"
-        )
-        done = {r["name"] for r in conn.execute("SELECT name FROM schema_migrations")}
-        for path in sorted(MIGRATIONS.glob("*.sql")):
-            if path.name in done:
-                continue
-            sql = path.read_text().replace("{{EMBEDDING_DIM}}", str(dim))
-            conn.execute(sql)
-            conn.execute("INSERT INTO schema_migrations (name) VALUES (%s)", (path.name,))
-            applied.append(path.name)
+    """Apply the SQL migrations. The shared tables (settings, sessions, API tokens, OIDC state) come from the kit."""
+    from apgkit import migrate as kit_migrate
+    from apgkit.auth.schema import SQL as AUTH_SQL
+
+    from .core import db
+
+    applied = kit_migrate.run(db, MIGRATIONS, extensions=("vector",), replacements={"{{EMBEDDING_DIM}}": str(get_settings().embedding_dim)})
+    with db.connect() as conn:      # after the app's own migrations: it upgrades tables they created (sessions) and adds the OIDC state
+        conn.execute(AUTH_SQL)
         conn.commit()
     return applied

@@ -7,6 +7,17 @@ affected version or commit.
 
 ## Security model
 
+**Federated sign-in** (optional, `PAGERLENS_OIDC_ISSUER`)
+- Access tokens are verified locally against the identity provider's JWKS (algorithm allow-list, issuer, audience, expiry), so
+  a token minted for another app or signed by another key is refused. Only the roles of THIS app are honoured, and they are
+  mapped to permissions in `core.py`; an authenticated person with no role here can do nothing.
+- Browser sign-in is authorization code + PKCE with state and nonce; the session is server-side and carries the person's roles
+  from the verified ID token. Sign-out also ends the single sign-on session. Role changes reach an existing session at its next sign-in.
+- `/mcp` needs the `mcp:use` permission; ingest and metrics credentials are refused. The tools that change state check
+  `incidents:investigate` or `incidents:write` again from the caller's own credential.
+- Services use the scopes `pagerlens.ingest`, `pagerlens.read` and `pagerlens.metrics`, which carry the same access as a local
+  `ingest`, `read` and `metrics` token. A service token with the ingest scope can push telemetry and read nothing.
+
 **Credentials**
 - First run: no credentials exist and every protected route is denied. The server prints a one-time setup code
   to its log; whoever presents it in the browser sets the admin password. The code is held in memory only and
@@ -15,14 +26,14 @@ affected version or commit.
 - Browser sessions use a random cookie (`HttpOnly`, `SameSite=Strict`, `Secure` over HTTPS). Only its SHA-256
   is stored server-side. Sessions last 12 hours and all end when the password changes or you sign out. Browser
   writes also require a custom header, and no credential is kept in page storage.
-- API tokens are random, shown once, stored as SHA-256 hashes, revocable, and have one of three scopes.
+- API tokens are random, shown once, stored as SHA-256 hashes, revocable, and have one of four scopes.
   `read` tokens can read incidents, reports and telemetry but cannot change data or manage accounts. `ingest`
   tokens can only push logs, metrics, deploys, services and alerts: they read nothing and are refused on `/mcp`.
   `metrics` tokens can only read `/metrics`: they read no incident data and are refused on `/mcp`.
   `full` tokens can do everything an admin session can.
-- `/mcp` accepts `read` and `full` bearer tokens only, never browser cookies. The tools that change state
-  (`investigate`, `add_note`, `mark_root_cause`) re-validate the caller's own token inside the tool, so a
-  read-only token cannot write even through a client that offers the tool.
+- `/mcp` accepts bearer credentials that hold `mcp:use` (`read` and `full` tokens, and federated people or services allowed to),
+  never browser cookies. The tools that change state (`investigate`, `add_note`, `mark_root_cause`) re-validate the caller's
+  own credential inside the tool, so a read-only token cannot write even through a client that offers the tool.
 - An optional static `PAGERLENS_API_KEY` remains for automation. It is a full-access credential held in the
   environment or a file: treat it like a password, or leave it unset and use tokens.
 - Failed sign-ins and bad credentials are rate limited (10 per minute per client address, in memory, per
@@ -86,7 +97,7 @@ affected version or commit.
   its output never triggers an action. A model can still be misled by hostile log text into a wrong *opinion*; the
   protection is that opinions need real cited evidence, are shown next to the rules' verdict, and a human decides.
   Model-written text in reports is labelled as such.
-- Only a `full` token (or an admin session) can start an AI investigation, because it spends provider credit.
+- Only a `full` token, an admin session or a federated `responder`/`admin` (permission `incidents:investigate`) can start an AI investigation, because it spends provider credit. Responders see the id, name and chat model of the accounts they may use, never base URLs or keys.
 
 **Platform**
 - The container runs as a non-root user. Secrets are never baked into the image or stored in the repository.

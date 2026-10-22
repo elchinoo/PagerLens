@@ -1,11 +1,12 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-csrf="X-PagerLens-CSRF">
 <head>
 <meta charset="utf-8">
 <title>PagerLens</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="description" content="Investigate incidents from your own telemetry: evidence-backed hypotheses, runbooks and memory on Postgres and pgvector.">
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<link rel="stylesheet" href="/kit/base.css">
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
@@ -55,7 +56,7 @@
   </section>
 </main>
 
-<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<div id="toast" class="toast" role="status" aria-live="polite" popover="manual" hidden></div>
 <script src="/static/app.js" type="module"></script>
 </body>
 </html>

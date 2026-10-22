@@ -1,5 +1,5 @@
 // Minimal, safe Markdown renderer for reports: headings, lists, quotes, rules, bold, inline code. Text nodes only.
-import { h } from "/static/ui.js";
+import { h } from "/kit/ui.js";
 
 function inline(text) {
   const out = [];

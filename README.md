@@ -2,7 +2,7 @@
 
 <h1 align="center">PagerLens</h1>
 
-An **incident-investigation agent** on **Postgres + pgvector**, with a web app, a REST API and an **MCP server**. When an alert fires, PagerLens gathers read-only evidence (deploys, metrics, error logs, dependencies), ranks the possible causes with the evidence that supports or refutes each one, suggests runbook steps, and **learns from the causes people confirm**. It never changes your systems.
+An **incident-investigation agent** on **Postgres + pgvector**, with a web app, a REST API and an **MCP server**, built on [agentpg-kit](https://github.com/elchinoo/agentpg-kit) with optional single sign-on through the ecosystem [identity provider](https://github.com/elchinoo/identity). When an alert fires, PagerLens gathers read-only evidence (deploys, metrics, error logs, dependencies), ranks the possible causes with the evidence that supports or refutes each one, suggests runbook steps, and **learns from the causes people confirm**. It never changes your systems.
 
 It ships with a **self-contained demo**: a fictional five-service online shop that breaks on demand, so everyone can try it without connecting anything. The same ingest API accepts your own logs, metrics, deploys and alerts.
 
@@ -24,7 +24,7 @@ It ships with a **self-contained demo**: a fictional five-service online shop th
 - **Memory:** mark the real cause and the incident is embedded in pgvector. Similar future incidents recall it as a prior. `pagerlens eval` measures a cold run against a warm one with the hidden answers.
 - **Runbooks:** retrieved with hybrid vector + full-text search (reciprocal rank fusion) and attached to the report as *manual* next steps.
 - **MCP server** at `/mcp` for Claude Code, VS Code, Codex, Cursor and more: ask "why is checkout failing?" from your editor.
-- **Safe by default:** first-run setup code, hashed tokens with separate `read`, `ingest` and `full` scopes, encrypted provider keys, PII scrubbing of every log line before it is stored, a strict CSP and a non-root container. See [SECURITY.md](SECURITY.md).
+- **Safe by default:** first-run setup code, hashed tokens with separate `read`, `ingest`, `metrics` and `full` scopes, optional single sign-on with roles, encrypted provider keys, PII scrubbing of every log line before it is stored, a strict CSP and a non-root container. See [SECURITY.md](SECURITY.md).
 
 ## Quick start
 
@@ -33,7 +33,7 @@ Requires Docker and Python 3.11+.
 ```bash
 cp .env.example .env              # then set POSTGRES_PASSWORD; .env is git-ignored
 docker compose up -d db
-python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+python3 -m venv .venv && .venv/bin/pip install -e ../agentpg-kit -e ".[dev]"   # the shared blocks sit next to this checkout (images install the published kit)
 set -a; . ./.env; set +a
 .venv/bin/pagerlens migrate
 .venv/bin/pagerlens seed          # demo fleet, runbooks and a healthy baseline
@@ -136,7 +136,7 @@ curl -X POST https://<your-host>/api/ingest/services -H "Authorization: Bearer $
 | **OpenTelemetry (OTLP/HTTP)** (`/v1/logs`, `/v1/metrics`) | any OpenTelemetry SDK or Collector | apps you can instrument, with no PagerLens-specific code |
 | **`pagerlens-agent`** (pull) | a small program you run anywhere | services that cannot push, black-box health, Prometheus `/metrics`, sandbox status |
 
-All three need an **Ingest** token (the agent also uses a **Metrics** token for each target it scrapes). Everything goes through the same validation and PII scrubbing. Apps that report their own telemetry need no access to your hosting platform.
+All three need an **Ingest** token, or a service token from the identity provider with the `pagerlens.ingest` scope (the agent also uses a **Metrics** token for each target it scrapes). Everything goes through the same validation and PII scrubbing. Apps that report their own telemetry need no access to your hosting platform.
 
 ### OpenTelemetry
 
@@ -169,6 +169,8 @@ pagerlens-agent once agent.yaml --dry-run  # one cycle, prints what would be sen
 pagerlens-agent run agent.yaml
 ```
 
+Instead of a hand-copied token the agent can get its own from the identity provider: register a `service` client allowed the scope `pagerlens.ingest` and set `PAGERLENS_AGENT_OIDC_ISSUER`, `PAGERLENS_AGENT_OIDC_CLIENT_ID` and `PAGERLENS_AGENT_OIDC_CLIENT_SECRET[_FILE]` (no `PAGERLENS_TOKEN` needed; a static token still wins when both are set). This covers what the agent pushes to PagerLens; the `token_env` of a scrape target (that app's own **Metrics** token) is unchanged.
+
 Secrets are only ever read from the environment variables named in the config; URLs with embedded credentials are refused; redirects are not followed; a rejected token stops the agent with a clear message and without printing the token; unsent data is kept in a bounded in-memory buffer and retried. Run it on your laptop, a VM or CI. Putting it in a sandbox means passing the token with `--env`, which is not a secret store, so prefer a place where you control the environment.
 
 ### `/metrics`
@@ -183,14 +185,51 @@ Files full of credentials are the usual way these tools leak, so PagerLens avoid
 |---|---|---|
 | **Admin password** | Entered once in the browser (first run needs the setup code from the server log) | Stored only as a salted **scrypt** hash. |
 | **Browser session** | An `HttpOnly`, `SameSite=Strict` cookie (`Secure` over HTTPS) | Random value, only its SHA-256 stored server-side, 12-hour expiry. State-changing browser requests also need a custom header. |
-| **API tokens** | Created in **Settings**, shown **once** | Only a SHA-256 hash is stored. Revocable. Scopes: `read` (list and read), `ingest` (push telemetry, read nothing, no MCP), `metrics` (scrape `/metrics` only) and `full`. |
+| **API tokens** | Created in **Settings**, shown **once** | Only a SHA-256 hash is stored. Revocable. Scopes: `read` (list and read), `ingest` (push telemetry, read nothing, no MCP), `metrics` (scrape `/metrics` only) and `full`. See [Single sign-on and roles](#single-sign-on-and-roles-the-ecosystem-identity-provider) for what each can do. |
 | **Provider API keys** (for the AI methods) | Entered in **Settings** | Encrypted (Fernet) with a random data key that your admin password wraps. The database alone reveals nothing; never returned by the API or logged. |
 
 After a **restart** stored provider keys are locked until you sign in. `pagerlens reset-admin` is the only recovery from a lost password and it deletes the stored keys. See [SECURITY.md](SECURITY.md) for the full model and its limits.
 
+## Single sign-on and roles (the ecosystem identity provider)
+
+PagerLens can run **standalone** (the first-run setup code and an admin password, as above) or **federated** with the ecosystem's
+[identity provider](https://github.com/elchinoo/identity). Register PagerLens there as a `web` app with client id `pagerlens`,
+redirect URI `https://<pagerlens>/auth/callback`, and the roles below, then set:
+
+| Variable | Meaning |
+|---|---|
+| `PAGERLENS_OIDC_ISSUER` | The identity provider's URL. Federation is off when unset. |
+| `PAGERLENS_OIDC_CLIENT_ID` | Default `pagerlens`. |
+| `PAGERLENS_OIDC_CLIENT_SECRET[_FILE]` | The app's secret from the provider. |
+| `PAGERLENS_PUBLIC_URL` | The URL PagerLens is reached at (used to build the callback). |
+| `PAGERLENS_LOCAL_LOGIN` | `false` removes the admin-password login when SSO is on (default keeps it as a break-glass). |
+| `PAGERLENS_ENCRYPTION_KEY[_FILE]` | With SSO only (no admin password) this lets PagerLens create and unlock its vault for stored provider keys. |
+
+| Role | May |
+|---|---|
+| `admin` | everything: provider accounts, API tokens, the Lab simulator (it replaces the demo telemetry), plus all of the below |
+| `responder` | read everything (dashboard, incidents, evidence, runbooks), **investigate** (including the AI methods, which spend provider credit), add notes, **resolve incidents** and record the root cause, use MCP including its write tools |
+| `viewer` | read the dashboard, incidents, evidence and runbooks; use MCP's read tools; cannot investigate, annotate or resolve |
+
+Credentials that are not people map onto the same permissions through scopes. Local API tokens keep exactly the access they always had:
+
+| Scope | Kind | Access |
+|---|---|---|
+| `read` | local API token | read dashboard, incidents, runbooks; MCP read tools |
+| `ingest` | local API token | push telemetry (`/api/ingest/*`, OTLP) and nothing else; refused on `/mcp` |
+| `metrics` | local API token | scrape `/metrics` and nothing else; refused on `/mcp` |
+| `full` | local API token | everything an admin can do |
+| `pagerlens.ingest` | identity-provider service scope | the same as an `ingest` token: what CityPulse, the CityPulse Simulator and `pagerlens-agent` use with `client_credentials` |
+| `pagerlens.read` | identity-provider service scope | the same as a `read` token |
+| `pagerlens.metrics` | identity-provider service scope | the same as a `metrics` token |
+
+Behind the roles and scopes are these permissions (see `src/pagerlens/core.py`): `dashboard:read`, `incidents:read`, `runbooks:read`,
+`incidents:investigate`, `incidents:write` (notes, resolve, root cause), `simulator:run`, `ingest:write`, `metrics:scrape`,
+`settings:manage` (accounts, tokens, vault, admin password) and `mcp:use`. A note added by a signed-in person carries their name.
+
 ## Using the MCP server
 
-PagerLens serves [MCP](https://modelcontextprotocol.io) over streamable HTTP at `https://<your-host>/mcp`, authenticated with `Authorization: Bearer <token>`. Create a **read-only** token under **Settings > API tokens**; use a **full** token only if the assistant should run investigations and record root causes. `ingest` tokens and browser sessions are rejected on `/mcp`. Tools:
+PagerLens serves [MCP](https://modelcontextprotocol.io) over streamable HTTP at `https://<your-host>/mcp`, authenticated with `Authorization: Bearer <token>`. Create a **read-only** token under **Settings > API tokens**; use a **full** token only if the assistant should run investigations and record root causes. With single sign-on, a person's access token works too: the `viewer` role reads, `responder` and `admin` can also use the write tools. `ingest` and `metrics` credentials and browser sessions are rejected on `/mcp`. Tools:
 
 | Tool | Needs | Purpose |
 |---|---|---|
@@ -200,11 +239,11 @@ PagerLens serves [MCP](https://modelcontextprotocol.io) over streamable HTTP at 
 | `get_timeline(incident_id)` | read | The report's timeline |
 | `similar_incidents(text, limit?)` | read | Resolved incidents that look similar, with how they were resolved |
 | `search_runbooks(query, limit?)` | read | Hybrid search over runbooks |
-| `investigate(incident_id, use_memory?, mode?, account?)` | **full** | Run a bounded, read-only investigation. `mode` is `rules` (default), `llm` or `hybrid`; the AI modes need `account` (a chat account id, or `env`) and spend that provider's credit |
-| `add_note(incident_id, note)` | **full** | Attach a note |
-| `mark_root_cause(incident_id, category, note?)` | **full** | Record the confirmed cause; the incident becomes memory |
+| `investigate(incident_id, use_memory?, mode?, account?)` | **full** or responder | Run a bounded, read-only investigation. `mode` is `rules` (default), `llm` or `hybrid`; the AI modes need `account` (a chat account id, or `env`) and spend that provider's credit |
+| `add_note(incident_id, note)` | **full** or responder | Attach a note |
+| `mark_root_cause(incident_id, category, note?)` | **full** or responder | Record the confirmed cause; the incident becomes memory |
 
-Write tools re-check the caller's own token, so a read-only token can never write even if a client offers the tool.
+Write tools re-check the caller's own credential (`incidents:investigate` or `incidents:write`), so a read-only token or a viewer can never write even if a client offers the tool.
 
 Set the token in the environment where the client runs, then add the server to your client. The same snippets, with your URL filled in, are on the app's **Connect** tab. Replace `<your-host>` below; for a local server use `http://localhost:8000/mcp`.
 

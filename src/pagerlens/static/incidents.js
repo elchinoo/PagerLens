@@ -1,7 +1,8 @@
-import { api } from "/static/api.js";
+import { api } from "/kit/api.js";
 import { LABELS, lineChart } from "/static/charts.js";
 import { renderMarkdown } from "/static/markdown.js";
-import { $, fill, h, setBusy, toast } from "/static/ui.js";
+import { can } from "/kit/session.js";
+import { $, fill, h, setBusy, toast } from "/kit/ui.js";
 
 const CATEGORY_NAMES = {
   bad_deploy: "Bad deploy", db_saturation: "Database saturation", resource_exhaustion: "Resource exhaustion",
@@ -65,11 +66,12 @@ async function renderDetail(box, id) {
       ? "No chat account yet. Add one under Settings (the key is stored encrypted)."
       : "The AI uses read-only tools, cites evidence and is checked before it counts. It sends log excerpts to the provider and spends its credit.");
   };
-  api("/api/accounts").then((a) => {
-    const usable = [...a.accounts, ...(a.env ? [a.env] : [])].filter((x) => x.chat_model);
-    for (const x of usable) acct.append(h("option", { value: String(x.id) }, `${x.name} · ${x.chat_model}`));
-    acct.dataset.count = String(usable.length);
-  }).catch(() => {}).finally(() => syncMode());
+  if (can("incidents:investigate")) {
+    api("/api/chat-accounts").then((a) => {
+      for (const x of a.accounts) acct.append(h("option", { value: String(x.id) }, `${x.name} · ${x.chat_model}`));
+      acct.dataset.count = String(a.accounts.length);
+    }).catch(() => {}).finally(() => syncMode());
+  }
   mode.addEventListener("change", () => { syncMode(); try { localStorage.setItem("pagerlens.mode", mode.value); } catch { /* ignore */ } });
   const go = h("button", { class: "primary", type: "button", onclick: async () => {
     if (mode.value !== "rules" && !acct.value) { toast("Choose an AI account first (Settings > Add account).", true); return; }
@@ -88,9 +90,9 @@ async function renderDetail(box, id) {
       h("span", { class: "badges" }, h("span", { class: sevClass(inc.severity) }, inc.severity), h("span", { class: `badge status ${inc.status}` }, inc.status))),
     h("p", { class: "muted" }, `${inc.service} · detected ${when(inc.detected_at)} · ${inc.symptom}`),
     inc.status === "resolved" ? h("div", { class: "banner ok" }, `Resolved as ${CATEGORY_NAMES[inc.root_cause_category] || inc.root_cause_category}${inc.root_cause_note ? ": " + inc.root_cause_note : ""}. This incident is now memory for future investigations.`) : null,
-    h("div", { class: "btns wrap" }, h("label", { class: "sr", for: "inv-mode" }, "Method"), mode, acct, go,
-      h("label", { class: "check inline", for: "use-memory" }, memory, " Use memory of resolved incidents")),
-    acctNote,
+    can("incidents:investigate") ? h("div", { class: "btns wrap" }, h("label", { class: "sr", for: "inv-mode" }, "Method"), mode, acct, go,
+      h("label", { class: "check inline", for: "use-memory" }, memory, " Use memory of resolved incidents")) : null,
+    can("incidents:investigate") ? acctNote : null,
     inc.runs[0] && inc.runs[0].warning ? h("div", { class: "banner" }, `Last run: ${inc.runs[0].warning}`) : null);
 
   const sections = [header, hypothesesSection(inc), h("div", { id: "charts-host" }), reportSection(inc), runSection(inc), resolveSection(inc, reload), notesSection(inc, reload)];
@@ -100,7 +102,7 @@ async function renderDetail(box, id) {
 
 function hypothesesSection(inc) {
   if (!inc.hypotheses.length) {
-    return h("section", { class: "card" }, h("h2", {}, "Hypotheses"), h("p", { class: "muted" }, "Press Investigate: PagerLens will gather read-only evidence, rank the possible causes and write a report. Nothing in your systems is changed."));
+    return h("section", { class: "card" }, h("h2", {}, "Hypotheses"), h("p", { class: "muted" }, can("incidents:investigate") ? "Press Investigate: PagerLens will gather read-only evidence, rank the possible causes and write a report. Nothing in your systems is changed." : "No investigation has run yet. A responder or administrator can run one."));
   }
   const obsHost = h("div", { class: "obs-host" });
   const cards = inc.hypotheses.map((hy) => h("article", { class: "hyp" },
@@ -164,6 +166,7 @@ function resolveSection(inc, reload) {
         fill(truth, r.truth ? h("p", {}, `Simulated scenario: `, h("strong", {}, r.truth.scenario), ` (true cause: ${CATEGORY_NAMES[r.truth.category] || r.truth.category}). Top hypothesis was ${inc.hypotheses[0] ? CATEGORY_NAMES[inc.hypotheses[0].category] || inc.hypotheses[0].category : "none"}.`) : h("p", { class: "muted" }, "This is not a simulated incident, so there is no recorded answer."));
       } }, "Reveal simulated answer"), truth);
   }
+  if (!can("incidents:write")) return h("section", { class: "card" }, h("h2", {}, "Close the loop"), h("p", { class: "muted" }, "Your role can read incidents but not resolve them."));
   const cat = h("select", { id: "rc-cat" }, ...Object.entries(CATEGORY_NAMES).map(([k, v]) => h("option", { value: k }, v)));
   const note = h("input", { id: "rc-note", maxlength: "1000", placeholder: "What actually happened? (optional)" });
   const top = inc.hypotheses[0];
@@ -183,11 +186,11 @@ function notesSection(inc, reload) {
   const box = h("textarea", { id: "note-body", rows: "2", maxlength: "4000", placeholder: "Add a note for the team…" });
   return h("section", { class: "card" }, h("h2", {}, "Notes"),
     ...inc.notes.map((n) => h("p", { class: "note" }, h("strong", {}, `${n.author} `), h("span", { class: "muted" }, when(n.created_at)), h("br"), n.body)),
-    h("div", { class: "field" }, box),
-    h("button", { class: "secondary", type: "button", onclick: async () => {
-      if (!box.value.trim()) return;
-      try { await api(`/api/incidents/${inc.id}/notes`, { method: "POST", json: { body: box.value } }); reload(); } catch (err) { toast(err.message, true); }
-    } }, "Add note"));
+    ...(can("incidents:write") ? [h("div", { class: "field" }, box),
+      h("button", { class: "secondary", type: "button", onclick: async () => {
+        if (!box.value.trim()) return;
+        try { await api(`/api/incidents/${inc.id}/notes`, { method: "POST", json: { body: box.value } }); reload(); } catch (err) { toast(err.message, true); }
+      } }, "Add note")] : []));
 }
 
 async function loadCharts(id, service) {

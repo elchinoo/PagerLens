@@ -241,3 +241,87 @@ def test_main_validates_config_and_requires_a_token(tmp_path, monkeypatch, capsy
     assert agent.main(["once", str(path)]) == 2 and "PAGERLENS_TOKEN" in capsys.readouterr().err
     path.write_text("targets: []\n")
     assert agent.main(["once", str(path), "--dry-run"]) == 2 and "config error" in capsys.readouterr().err
+
+
+# ---- a token from the identity provider instead of a hand-copied one -------------------------------------------
+
+def _source(monkeypatch=None):
+    from apgkit.auth import TokenSource
+
+    asked = []
+
+    def idp(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/.well-known/openid-configuration":
+            return httpx.Response(200, json={"issuer": "https://id.example", "token_endpoint": "https://id.example/oauth/token",
+                                             "jwks_uri": "https://id.example/jwks", "authorization_endpoint": "https://id.example/a"})
+        asked.append(request.content.decode())
+        return httpx.Response(200, json={"access_token": "minted-token", "expires_in": 300})
+
+    http = lambda: httpx.Client(transport=httpx.MockTransport(idp), follow_redirects=False)  # noqa: E731
+    return TokenSource("https://id.example", "pagerlens-agent", lambda: "client-secret", scope="pagerlens.ingest", http=http), asked
+
+
+def test_agent_pushes_with_a_minted_token_when_no_static_token_is_set(monkeypatch):
+    monkeypatch.delenv("PAGERLENS_TOKEN", raising=False)
+    sent = []
+    client = httpx.Client(transport=httpx.MockTransport(
+        lambda r: (sent.append(r.headers.get("authorization")), httpx.Response(200, json={}))[1] if r.url.host == "pl.example" else httpx.Response(200)),
+        follow_redirects=False)
+    config = agent.load_config(cfg_dict())
+    source, asked = _source()
+    a = agent.Agent(config, client, agent.Pusher(config, client, source=source))
+    a.cycle(now=1)
+    assert sent and set(sent) == {"Bearer minted-token"}
+    assert len(asked) == 1 and "scope=pagerlens.ingest" in asked[0] and "grant_type=client_credentials" in asked[0]   # cached across the whole cycle
+
+
+def test_a_static_token_wins_over_the_identity_provider(monkeypatch):
+    seen = set()
+    client = httpx.Client(transport=httpx.MockTransport(
+        lambda r: (seen.add(r.headers.get("authorization")), httpx.Response(200, json={}))[1] if r.url.host == "pl.example" else httpx.Response(200)),
+        follow_redirects=False)
+    monkeypatch.setenv("PAGERLENS_TOKEN", SECRET)
+    config = agent.load_config(cfg_dict())
+    source, asked = _source()
+    agent.Agent(config, client, agent.Pusher(config, client, source=source)).cycle(now=1)
+    assert seen == {f"Bearer {SECRET}"} and asked == []
+
+
+def test_an_unreachable_identity_provider_means_retry_not_loss(monkeypatch, capsys):
+    from apgkit.auth import TokenSource
+
+    monkeypatch.delenv("PAGERLENS_TOKEN", raising=False)
+    deny = lambda: httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(500)), follow_redirects=False)  # noqa: E731
+    source = TokenSource("https://id.example", "pagerlens-agent", lambda: "s", scope="pagerlens.ingest", http=deny)
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200)), follow_redirects=False)
+    config = agent.load_config(cfg_dict())
+    a = agent.Agent(config, client, agent.Pusher(config, client, source=source))
+    a.cycle(now=1)
+    assert a.pusher.pending and "identity provider" in capsys.readouterr().err
+
+
+def test_token_source_needs_all_three_variables(monkeypatch, tmp_path):
+    for v in ("PAGERLENS_AGENT_OIDC_ISSUER", "PAGERLENS_AGENT_OIDC_CLIENT_ID", "PAGERLENS_AGENT_OIDC_CLIENT_SECRET"):
+        monkeypatch.delenv(v, raising=False)
+    monkeypatch.setenv("PAGERLENS_AGENT_OIDC_CLIENT_SECRET_FILE", "/nonexistent/secret")
+    assert agent.token_source_from_env() is None
+    monkeypatch.setenv("PAGERLENS_AGENT_OIDC_ISSUER", "https://id.example")
+    monkeypatch.setenv("PAGERLENS_AGENT_OIDC_CLIENT_ID", "pagerlens-agent")
+    assert agent.token_source_from_env() is None                                  # no secret yet
+    secret_file = tmp_path / "secret"
+    secret_file.write_text("client-secret\n")
+    monkeypatch.setenv("PAGERLENS_AGENT_OIDC_CLIENT_SECRET_FILE", str(secret_file))
+    src = agent.token_source_from_env()
+    assert src is not None and src.scope == "pagerlens.ingest" and src.client_id == "pagerlens-agent"
+
+
+def test_main_accepts_the_identity_provider_in_place_of_a_token(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "a.yaml"
+    path.write_text("pagerlens: {url: 'https://pl.example'}\ntargets: [{name: web, probes: [{url: 'https://web.example/'}]}]\n")
+    monkeypatch.delenv("PAGERLENS_TOKEN", raising=False)
+    sent = set()
+    monkeypatch.setattr(agent, "_client", lambda: httpx.Client(transport=httpx.MockTransport(
+        lambda r: (sent.add(r.headers.get("authorization")), httpx.Response(200, json={}))[1] if r.url.host == "pl.example" else httpx.Response(200))))
+    assert agent.main(["once", str(path)]) == 2 and "PAGERLENS_AGENT_OIDC" in capsys.readouterr().err      # neither credential: refused
+    monkeypatch.setattr(agent, "token_source_from_env", lambda: _source()[0])
+    assert agent.main(["once", str(path)]) == 0 and sent == {"Bearer minted-token"}

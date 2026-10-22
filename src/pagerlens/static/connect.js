@@ -1,5 +1,5 @@
 import { CLIENTS } from "/static/clients.js";
-import { $, copy, h } from "/static/ui.js";
+import { $, copy, h } from "/kit/ui.js";
 
 let ready = false;
 

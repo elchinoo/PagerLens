@@ -1,9 +1,12 @@
-"""MCP surface. Read tools work with any read/full token; tools that change state (investigate, add_note,
-mark_root_cause) re-check that the caller's own token has full access, so a read-only token can never write."""
+"""MCP surface. The guard in api.py admits credentials that hold `mcp:use`; read tools then work for any of them, and the tools
+that change state (investigate, add_note, mark_root_cause) check their own permission again from the caller's own credential,
+so a read-only token or a viewer can never write."""
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from starlette.requests import Request
 
-from . import accounts, auth, incidents, investigator, retrieval, vault
+from . import accounts, incidents, investigator, retrieval, vault
+from .core import auth
 from .db import connect, connect_vector
 from .llm_http import LLMError
 
@@ -18,20 +21,23 @@ mcp = MCPServer(
 )
 
 
-class NeedsFullAccess(ToolError):  # ToolError messages are shown to the client; other exceptions are masked
+class NeedsPermission(ToolError):  # ToolError messages are shown to the client; other exceptions are masked
     pass
 
 
-def _require_full(ctx: Context) -> None:
-    """Re-validate the caller's token from the request header; never trust the transport layer alone."""
-    header = (ctx.headers or {}).get("authorization", "")
-    raw = header[7:].strip() if header[:7].lower() == "bearer " else ""
-    if raw and auth.static_key_matches(raw):
-        return
-    with connect(retries=1) as conn:
-        principal = auth.token_principal(conn, raw) if raw else None
-    if not principal or principal.scope != "full":
-        raise NeedsFullAccess("this tool needs a full-access token; the current one is read-only")
+def _require(ctx: Context, permission: str) -> None:
+    """Re-validate the caller's credential from the request header; never trust the transport layer alone."""
+    real = getattr(getattr(ctx, "request_context", None), "request", None)
+    headers = ctx.headers or {}
+    request = real if isinstance(real, Request) else Request({
+        "type": "http", "method": "POST", "path": "/mcp/", "query_string": b"", "client": ("mcp", 0),
+        "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()]})
+    try:
+        principal = auth.authenticate(request, allow_cookie=False)
+    except Exception:  # noqa: BLE001 - a bad or unverifiable credential is simply not allowed to write
+        principal = None
+    if principal is None or not principal.can(permission):
+        raise NeedsPermission(f"this credential cannot do that (it lacks '{permission}')")
 
 
 @mcp.tool()
@@ -90,10 +96,10 @@ def search_runbooks(query: str, limit: int = 3) -> list[dict]:
 @mcp.tool()
 def investigate(incident_id: int, ctx: Context, use_memory: bool = True, mode: str = "rules",
                 account: str | None = None) -> dict:
-    """Run a bounded, read-only investigation (needs a full-access token). mode is rules (default), llm or hybrid;
+    """Run a bounded, read-only investigation (needs a full-access token or the investigate permission). mode is rules (default), llm or hybrid;
     the AI modes need `account` (a chat account id or "env") and spend that provider's credit. Returns the ranked
     hypotheses and the report."""
-    _require_full(ctx)
+    _require(ctx, "incidents:investigate")
     with connect_vector() as conn:
         cfg = None
         if mode != "rules":
@@ -115,8 +121,8 @@ def investigate(incident_id: int, ctx: Context, use_memory: bool = True, mode: s
 
 @mcp.tool()
 def add_note(incident_id: int, note: str, ctx: Context) -> dict:
-    """Attach a note to an incident (needs a full-access token)."""
-    _require_full(ctx)
+    """Attach a note to an incident (needs a full-access token or the write permission)."""
+    _require(ctx, "incidents:write")
     with connect() as conn:
         note_id = incidents.add_note(conn, incident_id, note, author="mcp")
         conn.commit()
@@ -125,10 +131,10 @@ def add_note(incident_id: int, note: str, ctx: Context) -> dict:
 
 @mcp.tool()
 def mark_root_cause(incident_id: int, category: str, ctx: Context, note: str | None = None) -> dict:
-    """Record the confirmed cause and resolve the incident (needs a full-access token). The incident then becomes
+    """Record the confirmed cause and resolve the incident (needs a full-access token or the write permission). The incident then becomes
     memory that improves future investigations. category is one of: bad_deploy, db_saturation, resource_exhaustion,
     dependency_outage, traffic_spike, expired_certificate, service_down, sandbox_paused, database_unreachable, ingest_overload, sensor_fleet_outage, data_quality."""
-    _require_full(ctx)
+    _require(ctx, "incidents:write")
     with connect_vector() as conn:
         incidents.resolve(conn, incident_id, category, note)
         conn.commit()

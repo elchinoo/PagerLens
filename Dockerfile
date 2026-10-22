@@ -2,6 +2,10 @@ FROM python:3.14-slim
 
 WORKDIR /app
 
+# The shared blocks (agentpg-kit), pinned to a release; then the app itself.
+ARG KIT_URL=https://github.com/elchinoo/agentpg-kit/archive/refs/tags/v0.1.0.tar.gz
+RUN pip install --no-cache-dir "agentpg-kit @ ${KIT_URL}"
+
 COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install --no-cache-dir .

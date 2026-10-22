@@ -6,7 +6,7 @@ import pytest
 if not os.environ.get("TEST_DATABASE_URL"):
     pytest.skip("set TEST_DATABASE_URL to run DB tests", allow_module_level=True)
 
-from pagerlens import api, auth, migrate, vault  # noqa: E402
+from pagerlens import api, auth, core, migrate, vault  # noqa: E402
 from pagerlens.db import connect  # noqa: E402
 
 H = {"X-PagerLens-CSRF": "1"}
@@ -20,9 +20,9 @@ def _db(monkeypatch, client):
         monkeypatch.delenv(v, raising=False)
     monkeypatch.setenv("PAGERLENS_API_KEY_FILE", "/nonexistent/key")
     monkeypatch.setenv("PAGERLENS_ENCRYPTION_KEY_FILE", "/nonexistent/key")
-    api._failures.clear()
+    core.auth.limiter.clear()
     api._announced = False
-    auth._setup_code = None
+    core.local._setup_code = None
     vault.lock()
     client.cookies.clear()
     with connect() as c:

@@ -12,7 +12,7 @@ if not os.environ.get("TEST_DATABASE_URL"):
 
 from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import ExportLogsServiceRequest  # noqa: E402
 
-from pagerlens import api, auth, migrate, otlp, vault  # noqa: E402
+from pagerlens import api, auth, core, migrate, otlp, vault  # noqa: E402
 from pagerlens.db import connect  # noqa: E402
 
 H = {"X-PagerLens-CSRF": "1"}
@@ -27,8 +27,8 @@ def _db(monkeypatch, client):
         monkeypatch.delenv(v, raising=False)
     monkeypatch.setenv("PAGERLENS_API_KEY_FILE", "/nonexistent/key")
     monkeypatch.setenv("PAGERLENS_ENCRYPTION_KEY_FILE", "/nonexistent/key")
-    api._failures.clear()
-    auth._setup_code = None
+    core.auth.limiter.clear()
+    core.local._setup_code = None
     otlp._prev.clear()
     vault.lock()
     client.cookies.clear()

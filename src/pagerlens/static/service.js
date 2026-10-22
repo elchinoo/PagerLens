@@ -1,6 +1,6 @@
-import { api } from "/static/api.js";
+import { api } from "/kit/api.js";
 import { metricLabel, seriesChart } from "/static/charts.js";
-import { $, fill, h } from "/static/ui.js";
+import { $, fill, h } from "/kit/ui.js";
 import { ago, dot } from "/static/dashboard.js";
 
 const RANGES = [[15, "15 min"], [60, "1 hour"], [360, "6 hours"], [1440, "24 hours"]];

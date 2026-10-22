@@ -1,5 +1,5 @@
-import { api } from "/static/api.js";
-import { $, fill, h } from "/static/ui.js";
+import { api } from "/kit/api.js";
+import { $, fill, h } from "/kit/ui.js";
 
 export async function initRunbooks() {
   const box = $("view-runbooks");

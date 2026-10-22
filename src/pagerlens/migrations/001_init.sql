@@ -1,7 +1,7 @@
 -- PagerLens schema: instance settings and auth, the telemetry fleet, incidents, agent runs and the knowledge base.
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
-CREATE TABLE app_setting (
+CREATE TABLE IF NOT EXISTS app_setting (
     key   text PRIMARY KEY,
     value text NOT NULL
 );

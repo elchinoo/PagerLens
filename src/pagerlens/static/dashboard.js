@@ -1,6 +1,6 @@
-import { api } from "/static/api.js";
+import { api } from "/kit/api.js";
 import { metricLabel, sparkline } from "/static/charts.js";
-import { $, fill, h } from "/static/ui.js";
+import { $, fill, h } from "/kit/ui.js";
 
 const STATUS_LABEL = { down: "Down", degraded: "Degraded", stale: "No data", unknown: "Unknown", healthy: "Healthy" };
 const ORDER = ["down", "degraded", "stale", "unknown", "healthy"];

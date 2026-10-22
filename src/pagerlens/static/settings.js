@@ -1,5 +1,5 @@
-import { api } from "/static/api.js";
-import { $, copy, field, fill, fmtDate, h, toast } from "/static/ui.js";
+import { api } from "/kit/api.js";
+import { $, copy, field, fill, fmtDate, h, toast } from "/kit/ui.js";
 
 export async function initSettings() {
   await Promise.all([renderAccounts(), renderSecurity()]);
@@ -157,7 +157,7 @@ async function renderSecurity() {
       await api("/api/admin-password", { method: "POST", json: { current: has ? cur.value : null, new: nw.value } });
       cur.value = nw.value = nw2.value = "";
       toast("Password saved. You were signed out everywhere.");
-      window.dispatchEvent(new CustomEvent("pl-auth-lost"));
+      window.dispatchEvent(new CustomEvent("apg-auth-lost"));
     } catch (ex) { pErr.textContent = ex.message; }
   } },
   has ? field("Current password", cur) : null,

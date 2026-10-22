@@ -9,8 +9,8 @@ if not os.environ.get("TEST_DATABASE_URL"):
     pytest.skip("set TEST_DATABASE_URL to run DB tests", allow_module_level=True)
 
 from pagerlens import (  # noqa: E402
-    api,
     auth,
+    core,
     evaluate,
     incidents,
     investigator,
@@ -34,8 +34,8 @@ def _db(monkeypatch, client):
     monkeypatch.setenv("PAGERLENS_API_KEY_FILE", "/nonexistent/key")
     monkeypatch.setenv("PAGERLENS_ENCRYPTION_KEY_FILE", "/nonexistent/key")
     monkeypatch.setenv("LLM_API_KEY_FILE", "/nonexistent/key")
-    api._failures.clear()
-    auth._setup_code = None
+    core.auth.limiter.clear()
+    core.local._setup_code = None
     vault.lock()
     client.cookies.clear()
     with connect() as c:
@@ -255,12 +255,13 @@ def test_read_tokens_can_read_but_not_investigate_or_resolve(admin):
 
 
 def test_mcp_write_tools_recheck_the_callers_own_token(admin):
-    full, ro = make_token(admin, "full"), make_token(admin, "read")
+    full, ro, ing = make_token(admin, "full"), make_token(admin, "read"), make_token(admin, "ingest")
     ctx = lambda tok: SimpleNamespace(headers={"authorization": f"Bearer {tok}"} if tok else {})  # noqa: E731
-    mcp_server._require_full(ctx(full))
-    for tok in (ro, "pl_not-a-real-token", None):
-        with pytest.raises(mcp_server.NeedsFullAccess):
-            mcp_server._require_full(ctx(tok))
+    for perm in ("incidents:investigate", "incidents:write"):
+        mcp_server._require(ctx(full), perm)
+        for tok in (ro, ing, "pl_not-a-real-token", None):
+            with pytest.raises(mcp_server.NeedsPermission):
+                mcp_server._require(ctx(tok), perm)
     names = {t.name for t in mcp_server.mcp._tool_manager.list_tools()} if hasattr(mcp_server.mcp, "_tool_manager") else None
     if names is not None:
         assert {"list_incidents", "get_incident", "investigate", "mark_root_cause"} <= names

@@ -1,12 +1,12 @@
 import pytest
 from starlette.requests import Request
 
-from pagerlens import api
+from pagerlens import api, core
 
 
 @pytest.fixture(autouse=True)
 def _reset(monkeypatch):
-    api._failures.clear()
+    core.auth.limiter.clear()
     for v in ("PAGERLENS_ALLOW_ANONYMOUS", "PAGERLENS_API_KEY", "PAGERLENS_API_KEY_FILE"):
         monkeypatch.delenv(v, raising=False)
     monkeypatch.setenv("PAGERLENS_API_KEY_FILE", "/nonexistent/key")
@@ -43,10 +43,10 @@ def test_missing_credentials_do_not_count_towards_lockout(client):
         assert client.get("/api/incidents").status_code == 401
 
 
-def test_static_key_works_and_is_full_scope(monkeypatch):
+def test_static_key_works_and_holds_every_permission(monkeypatch):
     monkeypatch.setenv("PAGERLENS_API_KEY", "k")
     p = api.authenticate(_request({"Authorization": "Bearer k"}))
-    assert p is not None and p.kind == "static" and p.scope == "full"
+    assert p is not None and p.kind == "static" and p.can("settings:manage") and p.can("incidents:investigate")
 
 
 def test_anonymous_mode_is_explicit_opt_in(monkeypatch):

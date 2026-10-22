@@ -11,11 +11,10 @@ if not os.environ.get("TEST_DATABASE_URL"):
     pytest.skip("set TEST_DATABASE_URL to run DB tests", allow_module_level=True)
 
 from pagerlens import (  # noqa: E402
-    api,
     auth,
+    core,
     investigator,
     llm_agent,
-    llm_http,
     migrate,
     netguard,
     simulator,
@@ -38,8 +37,8 @@ def _db(monkeypatch, client):
     monkeypatch.setenv("PAGERLENS_API_KEY_FILE", "/nonexistent/key")
     monkeypatch.setenv("PAGERLENS_ENCRYPTION_KEY_FILE", "/nonexistent/key")
     monkeypatch.setenv("LLM_API_KEY_FILE", "/nonexistent/key")
-    api._failures.clear()
-    auth._setup_code = None
+    core.auth.limiter.clear()
+    core.local._setup_code = None
     vault.lock()
     client.cookies.clear()
     with connect() as c:
@@ -290,7 +289,7 @@ def test_api_runs_hybrid_through_a_stored_account_and_respects_the_vault(client,
             msg = {"role": "assistant", "content": final("bad_deploy", ids[:1])["text"]}
         return httpx.Response(200, json={"choices": [{"message": msg}], "usage": {"prompt_tokens": 50, "completion_tokens": 10}})
 
-    monkeypatch.setattr(llm_http, "_client", lambda: httpx.Client(transport=httpx.MockTransport(provider)))
+    monkeypatch.setattr(core.llm, "_http", lambda: httpx.Client(transport=httpx.MockTransport(provider)))
     monkeypatch.setattr(netguard.socket, "getaddrinfo", lambda host, port, **kw: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))])
     with connect() as c:
         auth.set_admin_password(c, PASSWORD)
