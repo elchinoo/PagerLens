@@ -30,23 +30,16 @@ function card(s) {
       s.depends_on.length ? h("span", { class: "muted small-text" }, `depends on ${s.depends_on.join(", ")}`) : null));
 }
 
-function draw(box) {
-  const { summary, services } = state.data;
-  const chips = [["all", `All ${summary.services}`], ...ORDER.filter((k) => summary[k]).map((k) => [k, `${STATUS_LABEL[k]} ${summary[k]}`])].map(([k, t]) =>
-    h("button", { type: "button", class: `chip ${state.filter === k ? "active" : ""} ${k}`, onclick: () => { state.filter = k; draw(box); } }, t));
-  const q = h("input", { id: "svc-q", type: "search", placeholder: "Filter services…", value: state.q, "aria-label": "Filter services",
-    oninput: (e) => { state.q = e.target.value; const pos = e.target.selectionStart; draw(box); const n = $("svc-q"); n.focus(); n.setSelectionRange(pos, pos); } });
-  const shown = services.filter((s) => (state.filter === "all" || s.status === state.filter) && s.name.includes(state.q.trim().toLowerCase()));
-  const worst = ORDER.find((k) => summary[k]) || "healthy";
-  const headline = summary.down ? `${summary.down} down` : summary.degraded ? `${summary.degraded} degraded` : summary.services ? "All systems healthy" : "Nothing monitored yet";
-  fill(box,
-    h("div", { class: `status-banner ${worst === "stale" || worst === "unknown" ? "degraded" : worst}` },
-      h("div", {}, h("h1", {}, dot(worst), " ", headline),
-        h("p", { class: "muted" }, `${summary.services} monitored systems · ${summary.open_incidents} open incident${summary.open_incidents === 1 ? "" : "s"} · refreshes every 10 s`)),
-      h("a", { class: "button-link", href: "#incidents" }, "All incidents")),
-    h("div", { class: "toolbar" }, h("div", { class: "chips" }, ...chips), q),
-    shown.length ? h("div", { class: "svc-grid" }, ...shown.map(card)) :
-      h("div", { class: "card" }, h("p", { class: "empty" }, summary.services ? "No service matches this filter." : "No systems yet. Point pagerlens-agent at your services, push telemetry (Connect tab), or load the demo fleet in the Lab.")),
+// The page is built once: the filter box and the "send your own telemetry" help live in a shell that the 10 s refresh
+// never touches (it would take the focus, the caret and the open <details> away). Only the banner, the chips and the
+// grid are redrawn from the data.
+let shell = null;
+
+function buildShell(box) {
+  const s = { box, banner: h("div", {}), chips: h("div", { class: "chips" }), grid: h("div", {}) };
+  s.q = h("input", { id: "svc-q", type: "search", placeholder: "Filter services…", value: state.q, "aria-label": "Filter services",
+    oninput: (e) => { state.q = e.target.value; drawData(s); } });
+  s.root = h("div", {}, s.banner, h("div", { class: "toolbar" }, s.chips, s.q), s.grid,
     h("details", { class: "card help" }, h("summary", {}, "Send your own telemetry"),
       h("p", { class: "muted" }, "Create an ingest-only token under Settings (it can push data but read nothing), then post to the API. Logs are scrubbed of emails, IPs, cards and secrets before they are stored."),
       h("pre", { class: "code" }, h("code", {}, `export PAGERLENS_TOKEN=<ingest token>
@@ -58,6 +51,32 @@ curl -X POST ${location.origin}/api/ingest/metrics \\
 curl -X POST ${location.origin}/api/ingest/alerts \\
   -H "Authorization: Bearer $PAGERLENS_TOKEN" -H "Content-Type: application/json" \\
   -d '{"service":"checkout-api","name":"HighErrorRate","summary":"5xx above 5%","severity":"sev2"}'`))));
+  fill(box, s.root);
+  return s;
+}
+
+function drawData(s) {
+  const { summary, services } = state.data;
+  const chips = [["all", `All ${summary.services}`], ...ORDER.filter((k) => summary[k]).map((k) => [k, `${STATUS_LABEL[k]} ${summary[k]}`])].map(([k, t]) =>
+    h("button", { type: "button", class: `chip ${state.filter === k ? "active" : ""} ${k}`, onclick: () => { state.filter = k; drawData(s); } }, t));
+  const shown = services.filter((x) => (state.filter === "all" || x.status === state.filter) && x.name.includes(state.q.trim().toLowerCase()));
+  const worst = ORDER.find((k) => summary[k]) || "healthy";
+  const headline = summary.down ? `${summary.down} down` : summary.degraded ? `${summary.degraded} degraded` : summary.services ? "All systems healthy" : "Nothing monitored yet";
+  fill(s.banner,
+    h("div", { class: `status-banner ${worst === "stale" || worst === "unknown" ? "degraded" : worst}` },
+      h("div", {}, h("h1", {}, dot(worst), " ", headline),
+        h("p", { class: "muted" }, `${summary.services} monitored systems · ${summary.open_incidents} open incident${summary.open_incidents === 1 ? "" : "s"} · refreshes every 10 s`)),
+      h("a", { class: "button-link", href: "#incidents" }, "All incidents")));
+  fill(s.chips, ...chips);
+  fill(s.grid, shown.length ? h("div", { class: "svc-grid" }, ...shown.map(card)) :
+    h("div", { class: "card" }, h("p", { class: "empty" }, summary.services ? "No service matches this filter." : "No systems yet. Point pagerlens-agent at your services, push telemetry (Connect tab), or load the demo fleet in the Lab.")));
+}
+
+function draw(box) {
+  // Rebuild the shell only when the view was taken over (first visit, an error message, another page in the box).
+  if (!shell || shell.box !== box || box.children[0] !== shell.root) shell = buildShell(box);
+  else if (shell.q.value !== state.q) shell.q.value = state.q;
+  drawData(shell);
 }
 
 async function load(box) {

@@ -14,10 +14,36 @@ const when = (s) => (s ? new Date(s).toLocaleString(undefined, { month: "short",
 const SOURCE_NAMES = { rules: "rules", llm: "AI", both: "rules + AI" };
 const sevClass = (s) => `badge sev ${s}`;
 
+let pendingAccount = null;
+
 export async function initIncidents(id) {
   const box = $("view-incidents");
   if (id) return renderDetail(box, id);
   return renderList(box);
+}
+
+// A reload of the detail page (after an investigation that took a minute, after a note or a resolution) must not
+// throw away what the person has meanwhile typed into the page: the note, the real cause, the method they picked.
+// It is read from the live page just before the new one replaces it, and put back with the focus and the caret.
+const DRAFTS = ["note-body", "rc-note", "rc-cat", "use-memory", "inv-mode", "inv-account"];
+let chartPick = { id: null, name: null };
+
+function grabDrafts(box) {
+  const out = {};
+  for (const key of DRAFTS) {
+    const el = box.querySelector("#" + key);
+    if (el) out[key] = { value: el.value, checked: el.checked, focused: document.activeElement === el, from: el.selectionStart, to: el.selectionEnd };
+  }
+  return out;
+}
+
+function putDrafts(box, drafts) {
+  for (const [key, d] of Object.entries(drafts)) {
+    const el = box.querySelector("#" + key);
+    if (!el) continue;
+    if (key === "use-memory") el.checked = d.checked; else if (key !== "inv-account") el.value = d.value;   // the account options arrive later
+    if (d.focused) { el.focus(); if (d.from != null && el.setSelectionRange) try { el.setSelectionRange(d.from, d.to); } catch { /* not a text field */ } }
+  }
 }
 
 async function renderList(box) {
@@ -43,13 +69,14 @@ async function renderList(box) {
         h("a", { class: "button-link", href: "#lab" }, "Go to the Lab")));
 }
 
-async function renderDetail(box, id) {
-  fill(box, h("p", { class: "loading" }, "Loading…"));
+async function renderDetail(box, id, soft = false) {
+  if (!soft) fill(box, h("p", { class: "loading" }, "Loading…"));   // a soft reload keeps the page (and what is typed in it) until the new one is ready
   let inc;
   try { inc = await api(`/api/incidents/${id}`); } catch (err) {
-    fill(box, h("a", { href: "#incidents" }, "← Incidents"), h("p", { class: "error" }, err.message)); return;
+    if (soft) toast(err.message, true); else fill(box, h("a", { href: "#incidents" }, "← Incidents"), h("p", { class: "error" }, err.message));
+    return;
   }
-  const reload = () => renderDetail(box, id);
+  const reload = () => renderDetail(box, id, true);
   const memory = h("input", { id: "use-memory", type: "checkbox", checked: true });
   const mode = h("select", { id: "inv-mode", "aria-label": "Method" },
     h("option", { value: "rules" }, "Rules (no AI, free)"),
@@ -70,6 +97,8 @@ async function renderDetail(box, id) {
     api("/api/chat-accounts").then((a) => {
       for (const x of a.accounts) acct.append(h("option", { value: String(x.id) }, `${x.name} · ${x.chat_model}`));
       acct.dataset.count = String(a.accounts.length);
+      if (pendingAccount && a.accounts.some((x) => String(x.id) === pendingAccount)) acct.value = pendingAccount;
+      pendingAccount = null;
     }).catch(() => {}).finally(() => syncMode());
   }
   mode.addEventListener("change", () => { syncMode(); try { localStorage.setItem("pagerlens.mode", mode.value); } catch { /* ignore */ } });
@@ -96,7 +125,10 @@ async function renderDetail(box, id) {
     inc.runs[0] && inc.runs[0].warning ? h("div", { class: "banner" }, `Last run: ${inc.runs[0].warning}`) : null);
 
   const sections = [header, hypothesesSection(inc), h("div", { id: "charts-host" }), reportSection(inc), runSection(inc), resolveSection(inc, reload), notesSection(inc, reload)];
+  const drafts = soft ? grabDrafts(box) : {};
   fill(box, ...sections);
+  putDrafts(box, drafts);
+  if (drafts["inv-account"]) pendingAccount = drafts["inv-account"].value;
   loadCharts(id, inc.service);
 }
 
@@ -189,7 +221,7 @@ function notesSection(inc, reload) {
     ...(can("incidents:write") ? [h("div", { class: "field" }, box),
       h("button", { class: "secondary", type: "button", onclick: async () => {
         if (!box.value.trim()) return;
-        try { await api(`/api/incidents/${inc.id}/notes`, { method: "POST", json: { body: box.value } }); reload(); } catch (err) { toast(err.message, true); }
+        try { await api(`/api/incidents/${inc.id}/notes`, { method: "POST", json: { body: box.value } }); box.value = ""; reload(); } catch (err) { toast(err.message, true); }
       } }, "Add note")] : []));
 }
 
@@ -200,12 +232,14 @@ async function loadCharts(id, service) {
   try { t = await api(`/api/incidents/${id}/telemetry`); } catch { return; }
   const names = Object.keys(t.services);
   const grid = h("div", { class: "charts" });
-  const select = h("select", { "aria-label": "Service", onchange: (e) => draw(e.target.value) }, ...names.map((n) => h("option", { value: n }, n === service ? `${n} (alerting)` : `${n} (dependency)`)));
+  const first = chartPick.id === id && names.includes(chartPick.name) ? chartPick.name : service;
+  const select = h("select", { "aria-label": "Service", onchange: (e) => { chartPick = { id, name: e.target.value }; draw(e.target.value); } }, ...names.map((n) => h("option", { value: n }, n === service ? `${n} (alerting)` : `${n} (dependency)`)));
+  select.value = first;
   function draw(name) {
     const s = t.services[name];
     fill(grid, ...Object.entries(s.metrics).map(([m, pts]) => h("figure", { class: "chartbox" }, h("figcaption", {}, LABELS[m] || m), lineChart(pts, { anchor: t.anchor, deploys: s.deploys, label: `${LABELS[m] || m} for ${name}` }))));
   }
   fill(host, h("section", { class: "card" }, h("div", { class: "row" }, h("h2", {}, "Telemetry"), select),
     h("p", { class: "muted" }, "Last 90 minutes. Dashed line: alert fired. Dotted lines: deploys."), grid));
-  draw(service);
+  draw(first);
 }
