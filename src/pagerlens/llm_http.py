@@ -1,5 +1,5 @@
 """The outbound LLM client now lives in agentpg-kit; this module keeps the old import path."""
-from apgkit.llm import MAX_RESPONSE_BYTES, LLMError, redact  # noqa: F401
+from apgkit.llm import MAX_RESPONSE_BYTES, LLMError, answer_text, empty_answer_error, redact  # noqa: F401
 
 from .core import llm as _llm
 

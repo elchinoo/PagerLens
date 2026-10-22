@@ -31,7 +31,7 @@ from . import chat as chatter
 from .core import COOKIE, CSRF_HEADER, auth, fed, local
 from .db import connect, connect_vector
 from .embeddings import embed as embed_texts
-from .llm_http import LLMError
+from .llm_http import LLMError, empty_answer_error
 from .mcp_server import mcp
 from .netguard import UnsafeURL
 from .tools import ToolError
@@ -467,7 +467,9 @@ def test_account(account: str, body: TestBody):
     with _translate(), connect() as conn:
         if body.target == "chat":
             reply = chatter.chat(accounts.chat_config_for(conn, _ref(account)),
-                               [{"role": "user", "content": "Reply with the single word OK."}], max_tokens=8)
+                               [{"role": "user", "content": "Reply with the single word OK. Keep any reasoning very short."}], max_tokens=64)
+            if not reply["text"]:
+                raise empty_answer_error(reply.get("response"), 64)
             detail = {"reply": reply["text"][:60]}
         else:
             cfg = (embedcfg.from_env() if account == "env" else accounts.embedding_config_for(conn, int(account)))

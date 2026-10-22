@@ -26,4 +26,4 @@ def chat(cfg: ChatConfig, messages: list[dict], max_tokens: int = 700, tools: li
     except (KeyError, IndexError, TypeError, ValueError) as exc:
         raise LLMError("unexpected response from the chat endpoint (no choices[0].message)") from exc
     return {"text": (msg.get("content") or "").strip(), "tool_calls": msg.get("tool_calls") or [],
-            "usage": data.get("usage") or {}, "message": msg}
+            "usage": data.get("usage") or {}, "message": msg, "response": data}

@@ -30,6 +30,10 @@ def provider(request: httpx.Request) -> httpx.Response:
         dim = body.get("dimensions", 16)
         data = [{"index": i, "embedding": hash_embed(t, dim)} for i, t in enumerate(body["input"])]
         return httpx.Response(200, json={"data": data})
+    if request.url.path.endswith("/chat/completions") and body.get("model") == "thinker":
+        used = body["max_tokens"] if body["max_tokens"] < 100 else 100  # a thinking model that never gets to answer
+        return httpx.Response(200, json={"choices": [{"message": {"content": "", "reasoning_content": "Hmm, let me think"},
+                                                      "finish_reason": "length"}], "usage": {"completion_tokens": used}})
     if request.url.path.endswith("/chat/completions"):
         reply = "Customers are notified within 72 hours [1]." if "breach" in body["messages"][-1]["content"] else "No idea."
         return httpx.Response(200, json={"choices": [{"message": {"content": reply}}], "usage": {"total_tokens": 42}})
@@ -151,6 +155,19 @@ def test_connection_test_reports_success_and_safe_errors(admin):
     r = admin.post(f"/api/accounts/{bad}/test", json={"target": "chat"}, headers=H)
     assert r.status_code == 502 and "401" in r.json()["detail"]
     assert "nope" * 6 not in r.text  # the provider echoed the key; it must be redacted
+
+
+def test_chat_test_uses_a_budget_a_thinking_model_can_answer_in_and_shows_the_real_reason(admin):
+    good = new_account(admin).json()["id"]
+    assert admin.post(f"/api/accounts/{good}/test", json={"target": "chat"}, headers=H).status_code == 200
+    assert CALLS[-1]["body"]["max_tokens"] == 64
+    assert "single word" in CALLS[-1]["body"]["messages"][-1]["content"]
+    thinker = new_account(admin, name="thinker", chat_model="thinker").json()["id"]
+    r = admin.post(f"/api/accounts/{thinker}/test", json={"target": "chat"}, headers=H)
+    assert r.status_code == 502
+    detail = r.json()["detail"]
+    assert "all 64 completion tokens" in detail and "finish_reason=length" in detail and "thinking phase" in detail
+    assert "empty answer" not in detail and PROVIDER_KEY not in r.text
 
 
 def test_redirects_are_refused(admin, monkeypatch):
