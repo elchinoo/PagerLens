@@ -474,7 +474,15 @@ Notes:
 | `PAGERLENS_ALLOW_PRIVATE_LLM_URLS` | `false` | Allow provider URLs on loopback/private networks, for a local model server. Link-local is always blocked. |
 | `PAGERLENS_API_KEY` | none | Optional static full-access credential for automation (file alternative: `/etc/pagerlens/api_key`). Prefer API tokens. |
 | `PAGERLENS_ALLOW_ANONYMOUS` | `false` | `true` disables authentication entirely. Throwaway local demos only. |
-| `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_CHAT_MODEL`, `EMBEDDING_MODEL`, `EMBEDDING_DIM` | none | Optional environment provider: embeddings for retrieval, and the `env` chat account for the AI methods. The schema is created for `EMBEDDING_DIM` (default 768) on first start, so set it before the first run. Without a provider a built-in offline hashing embedder is used: it matches words, not meaning. |
+| `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_CHAT_MODEL`, `EMBEDDING_MODEL`, `EMBEDDING_DIM` | none | Optional environment provider: embeddings for retrieval, and the `env` chat account for the AI methods. The vector columns are created for `EMBEDDING_DIM` (default 768) on first start; if you change it later, the next start resizes them and re-embeds (see below). Without a provider a built-in offline hashing embedder is used: it matches words, not meaning. |
+
+**Changing `EMBEDDING_DIM` (or the model) on an existing database.** Stored vectors are derived data and cannot be converted between sizes. At startup, before anything else, PagerLens compares the size of `incident.embedding` and `runbook.embedding` with the configured one. If they differ it drops the two HNSW indexes, resizes the columns (`USING NULL`) and recreates the indexes in one transaction, then re-embeds every runbook (title + body) and incident (symptom, plus the stored error signatures once investigated or resolved) in batches. Notes:
+
+- Startup never fails because of embeddings. If the provider is down, or the size cannot be applied, one line is logged, the rows keep a NULL embedding (runbook search falls back to full-text; incident recall returns nothing until they are filled) and the web app comes up. Missing embeddings are retried on every start.
+- Sizes above 2000 cannot be indexed by pgvector (HNSW): the change is refused with a message and the old columns are kept.
+- More than 5000 rows to embed: the columns are resized at startup and the re-embedding continues in a background thread.
+- `pagerlens reembed` does the same on demand and re-embeds everything even if the size is unchanged (a new model with the same size); it probes the provider first and changes nothing if it fails. Admins also have `GET /api/embeddings/status` (configured vs stored size, rows without a vector, `needs_reembedding`, job progress) and `POST /api/embeddings/reembed`. There is no UI for this yet.
+- The model and size the vectors were made with are recorded in the `embedding_index` setting.
 
 Retrieval embeddings are configured from the environment only in this version; the Settings page manages the chat provider accounts used by the AI methods. The same variables (`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_CHAT_MODEL`) also define the `env` account.
 

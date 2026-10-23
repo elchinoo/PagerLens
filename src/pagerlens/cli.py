@@ -17,6 +17,7 @@ def main(argv: list[str] | None = None) -> int:
     ev = sub.add_parser("eval", help="before/after learning evaluation on the simulator (resets demo telemetry)")
     ev.add_argument("--mode", choices=["rules", "llm", "hybrid"], default="rules")
     ev.add_argument("--account", default=None, help="chat account id, or 'env'; AI modes spend provider credit")
+    sub.add_parser("reembed", help="resize the vector columns to EMBEDDING_DIM if needed and re-embed incidents and runbooks")
     sub.add_parser("serve", help="run the API + MCP server")
     sub.add_parser("reset-admin", help="forget the admin password and delete stored provider keys (recovery)")
     sub.add_parser("start", help="container entrypoint: migrate, optionally seed (AUTO_SEED=true), serve")
@@ -61,6 +62,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{phase}: top-1 {r[phase + '_top1']:.0%}, top-3 {r[phase + '_top3']:.0%}")
         if args.mode != "rules":
             print(f"tokens used: {r['tokens']['prompt']} prompt, {r['tokens']['completion']} completion")
+    elif args.cmd == "reembed":
+        return _reembed()
     elif args.cmd == "reset-admin":
         from . import auth
         from .db import connect
@@ -88,15 +91,60 @@ def _chat_cfg(conn, mode: str, account: str | None):
 
 
 def _ensure_runbooks() -> None:
-    """Runbooks are reference material, not demo data: make sure they exist even when the Lab is never used."""
+    """Runbooks are reference material, not demo data: make sure they exist even when the Lab is never used.
+    Embedding problems (provider down, size mismatch) are logged and the row stored without a vector; they never stop startup."""
     from . import simulator
     from .db import connect_vector
 
-    with connect_vector() as conn:
-        added = simulator.seed_runbooks(conn)
-        conn.commit()
+    try:
+        with connect_vector() as conn:
+            added = simulator.seed_runbooks(conn)
+            conn.commit()
+    except Exception as exc:  # noqa: BLE001 - the web app must come up; runbooks are retried on the next start
+        print(f"runbook seeding skipped: {type(exc).__name__}: {str(exc)[:200]}", file=sys.stderr)
+        return
     if added:
         print(f"runbooks added: {added}")
+
+
+def _reconcile_embeddings() -> None:
+    """Resize the vector columns when EMBEDDING_DIM changed, then fill in missing embeddings. Never stops startup."""
+    from .db import connect_vector
+    from .migrate import reconcile_embedding_dim
+
+    try:
+        with connect_vector() as conn:
+            r = reconcile_embedding_dim(conn)
+    except Exception as exc:  # noqa: BLE001 - startup must survive any embedding or index problem
+        print(f"embedding reconciliation skipped: {type(exc).__name__}: {str(exc)[:200]}", file=sys.stderr)
+        return
+    if r["refused"]:
+        print(f"embedding size not applied: {r['refused']}", file=sys.stderr)
+    elif r["changed"] or any(r["embedded"].values()) or r["deferred"]:
+        print(f"embeddings: {r['dimension']} dimensions, re-embedded {r['embedded']}"
+              + (" (continuing in the background)" if r["deferred"] else "")
+              + (f", stopped early: {r['failed']}" if r["failed"] else ""))
+
+
+def _reembed() -> int:
+    from .db import connect_vector
+    from .migrate import reconcile_embedding_dim
+
+    try:
+        with connect_vector() as conn:
+            r = reconcile_embedding_dim(conn, defer_above=None, force=True, strict=True)
+    except Exception as exc:  # noqa: BLE001 - strict mode: the provider probe failed before anything changed
+        print(f"reembed failed (no changes were made): {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    if r["refused"]:
+        print(f"reembed refused: {r['refused']}", file=sys.stderr)
+        return 1
+    if r["failed"]:
+        print(f"reembed stopped early: {r['failed']} (re-run later; rows without a vector use text search)", file=sys.stderr)
+        return 1
+    done = ", ".join(f"{n} {t}s" for t, n in r["embedded"].items())
+    print(f"done: vector size {r['dimension']}" + (f" (was {r['previous']})" if r["changed"] else "") + f", re-embedded {done}")
+    return 0
 
 
 def _seed() -> None:
@@ -134,6 +182,10 @@ def _start() -> int:
               "  agentpg extensions create <instance-id> pg_trgm", file=sys.stderr)
         return 1
     print("migrations applied:", ", ".join(applied) if applied else "none (up to date)")
+    import logging
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    _reconcile_embeddings()
     _ensure_runbooks()
     if os.environ.get("AUTO_SEED", "").lower() in {"1", "true", "yes"}:
         from .db import connect

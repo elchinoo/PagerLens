@@ -251,12 +251,33 @@ def seed_fleet(conn) -> None:
 
 
 def seed_runbooks(conn) -> int:
+    """Insert the runbooks that do not exist yet. Only those are embedded; if the embedding cannot be had (provider
+    down, size mismatch) the row is stored with a NULL embedding (text search still finds it) and one line is logged:
+    the reconciler fills it in on a later start. Never raises because of embeddings."""
+    import logging
+
     from . import retrieval
+    from .migrate import column_dim
+
+    have = {r["title"] for r in conn.execute("SELECT title FROM runbook")}
+    todo = [rb for rb in RUNBOOKS if rb[0] not in have]
+    fits = column_dim(conn, "runbook") if todo else None
+    usable = fits is not None
     n = 0
-    for title, category, service, body in RUNBOOKS:
+    for title, category, service, body in todo:
+        vec = None
+        if usable:
+            try:
+                vec = retrieval.embed_one(f"{title}. {body}")
+                if len(vec.to_list()) != fits:
+                    raise ValueError(f"the model returned {len(vec.to_list())} dimensions but runbook.embedding has {fits}")
+            except Exception as exc:  # noqa: BLE001 - provider, network, vault or size problems: store without a vector
+                logging.getLogger("pagerlens.embeddings").warning(
+                    "runbooks are stored without embeddings for now (%s); they are embedded on a later start or by "
+                    "`pagerlens reembed`", retrieval.describe(exc))
+                vec, usable = None, False
         row = conn.execute("INSERT INTO runbook (title, category, service, body, embedding) VALUES (%s,%s,%s,%s,%s) "
-                           "ON CONFLICT (title) DO NOTHING RETURNING id",
-                           (title, category, service, body, retrieval.embed_one(f"{title}. {body}"))).fetchone()
+                           "ON CONFLICT (title) DO NOTHING RETURNING id", (title, category, service, body, vec)).fetchone()
         n += 1 if row else 0
     return n
 

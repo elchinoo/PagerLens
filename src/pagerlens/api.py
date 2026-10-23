@@ -23,6 +23,7 @@ from . import (
     ingest,
     investigator,
     metrics,
+    migrate,
     otlp,
     simulator,
     vault,
@@ -477,6 +478,25 @@ def test_account(account: str, body: TestBody):
             detail = {"dimensions": len(vec), "model": cfg.model}
     return {"ok": True, "ms": int((time.monotonic() - started) * 1000), **detail}
 
+
+
+@app.get("/api/embeddings/status", dependencies=[Depends(require("settings:manage"))])
+def embeddings_status():
+    """Configured vs stored vector size, rows still lacking a vector and the background job: 'needs re-embedding' lives here."""
+    with connect_vector() as conn:
+        return migrate.embedding_status(conn)
+
+
+@app.post("/api/embeddings/reembed", dependencies=[Depends(require("settings:manage"))])
+def reembed_embeddings():
+    """Resize the vector columns to EMBEDDING_DIM if needed and re-embed every incident and runbook in the background."""
+    with connect_vector() as conn:
+        st = migrate.embedding_status(conn)
+    if not st["indexable"]:
+        raise HTTPException(422, f"{st['configured']['dimension']} dimensions cannot be indexed (limit {migrate.MAX_HNSW_DIM})")
+    if not migrate.start_reembed_job():
+        raise HTTPException(409, "a re-embedding job is already running")
+    return {"started": True}
 
 
 # --- ingest: write-only for 'ingest' tokens -------------------------------------------------------

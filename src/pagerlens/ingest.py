@@ -142,11 +142,12 @@ def raise_alert(conn, service: str, name: str, *, summary: str | None = None, se
     summary = scrub(summary or name)[:500]
     fired = fired_at or _now()
     fp = _fingerprint(service, name)
-    vec = retrieval.embed_one(f"{service}: {name}. {summary}")
+    vec = retrieval.query_vector(conn, f"{service}: {name}. {summary}", "incident")   # None: dedupe by fingerprint only
+    similar = "OR (embedding IS NOT NULL AND 1 - (embedding <=> %s) > 0.9)" if vec is not None else ""
     existing = conn.execute(
         "SELECT id FROM incident WHERE service_id=%s AND status <> 'resolved' AND detected_at > now() - interval '3 hours' "
-        "AND (fingerprint=%s OR (embedding IS NOT NULL AND 1 - (embedding <=> %s) > 0.9)) "
-        "ORDER BY detected_at DESC LIMIT 1", (sid, fp, vec)).fetchone()
+        f"AND (fingerprint=%s {similar}) "  # noqa: S608 - fixed fragment
+        "ORDER BY detected_at DESC LIMIT 1", (sid, fp, *([vec] if vec is not None else []))).fetchone()
     if existing:
         incident_id, created = existing["id"], False
     else:
