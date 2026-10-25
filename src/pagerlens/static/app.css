@@ -94,3 +94,9 @@ details.help { margin-top: 1.5rem; } details.help summary { cursor: pointer; fon
 .wrap-cell { white-space: normal; max-width: 26rem; overflow-wrap: anywhere; }
 .chip.link.down { border-color: var(--bad); } .chip.link.degraded { border-color: var(--amber); } .chip.link.healthy { border-color: var(--good); }
 @media (max-width: 40rem) { .charts-wide { grid-template-columns: 1fr; } .svc-grid { grid-template-columns: 1fr; } }
+.badge.stale { background: var(--bg); color: var(--muted); border: 1px solid var(--line); }
+.danger-zone { border-color: var(--err); margin-top: 1rem; }
+.danger-zone h3 { margin-top: 0; }
+details.help .danger-zone { border: 0; padding: 0; box-shadow: none; margin-top: .5rem; }
+.bulk { margin-top: 1rem; } .bulk .btns { margin-top: .6rem; }
+td.pick { width: 1.5rem; }

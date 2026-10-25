@@ -6,19 +6,28 @@ class NotFound(LookupError):
     pass
 
 
-def list_incidents(conn, *, status: str | None = None, limit: int = 50) -> list[dict]:
+def list_incidents(conn, *, status: str | None = None, limit: int = 50, service: str | None = None) -> list[dict]:
     return conn.execute(
-        "SELECT i.id, i.title, i.status, i.severity, s.name AS service, i.detected_at, i.resolved_at, "
-        "i.root_cause_category, (SELECT count(*) FROM alert a WHERE a.incident_id = i.id) AS alerts, "
+        "SELECT i.id, i.title, i.status, i.severity, COALESCE(s.name, i.service_name) AS service, i.detected_at, i.resolved_at, "
+        "i.root_cause_category, i.root_cause_note, (SELECT count(*) FROM alert a WHERE a.incident_id = i.id) AS alerts, "
         "(SELECT h.title FROM hypothesis h WHERE h.incident_id = i.id ORDER BY h.run_id DESC, h.rank LIMIT 1) AS top_hypothesis "
-        "FROM incident i JOIN service s ON s.id = i.service_id WHERE (%s::text IS NULL OR i.status = %s) "
-        "ORDER BY i.detected_at DESC LIMIT %s", (status, status, max(1, min(limit, 200)))).fetchall()
+        "FROM incident i LEFT JOIN service s ON s.id = i.service_id WHERE (%s::text IS NULL OR i.status = %s) "
+        "AND (%s::text IS NULL OR COALESCE(s.name, i.service_name) = %s) "
+        "ORDER BY i.detected_at DESC LIMIT %s", (status, status, service, service, max(1, min(limit, 200)))).fetchall()
+
+
+def count_incidents(conn, *, status: str | None = None, service: str | None = None) -> int:
+    """How many incidents match a list filter (the list itself is capped; bulk resolution is not)."""
+    return conn.execute(
+        "SELECT count(*) AS n FROM incident i LEFT JOIN service s ON s.id = i.service_id WHERE (%s::text IS NULL OR i.status = %s) "
+        "AND (%s::text IS NULL OR COALESCE(s.name, i.service_name) = %s)", (status, status, service, service)).fetchone()["n"]
 
 
 def get_incident(conn, incident_id: int) -> dict:
     inc = conn.execute(
-        "SELECT i.id, i.title, i.status, i.severity, s.name AS service, i.symptom, i.detected_at, i.resolved_at, "
-        "i.root_cause_category, i.root_cause_note FROM incident i JOIN service s ON s.id = i.service_id WHERE i.id=%s",
+        "SELECT i.id, i.title, i.status, i.severity, COALESCE(s.name, i.service_name) AS service, i.symptom, i.detected_at, "
+        "i.resolved_at, i.root_cause_category, i.root_cause_note FROM incident i LEFT JOIN service s ON s.id = i.service_id "
+        "WHERE i.id=%s",
         (incident_id,)).fetchone()
     if not inc:
         raise NotFound("incident not found")
@@ -112,8 +121,8 @@ def telemetry(conn, incident_id: int, minutes: int = 90) -> dict:
     """Metric series and deploys for the incident's service and its dependencies, ending just after detection."""
     from datetime import timedelta
 
-    inc = conn.execute("SELECT i.detected_at, s.name, s.depends_on FROM incident i JOIN service s ON s.id=i.service_id "
-                       "WHERE i.id=%s", (incident_id,)).fetchone()
+    inc = conn.execute("SELECT i.detected_at, COALESCE(s.name, i.service_name) AS name, COALESCE(s.depends_on, '{}') AS depends_on "
+                       "FROM incident i LEFT JOIN service s ON s.id=i.service_id WHERE i.id=%s", (incident_id,)).fetchone()
     if not inc:
         raise NotFound("incident not found")
     start, end = inc["detected_at"] - timedelta(minutes=max(10, min(minutes, 240))), inc["detected_at"] + timedelta(minutes=2)

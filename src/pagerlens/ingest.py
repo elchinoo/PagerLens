@@ -152,9 +152,9 @@ def raise_alert(conn, service: str, name: str, *, summary: str | None = None, se
         incident_id, created = existing["id"], False
     else:
         incident_id = conn.execute(
-            "INSERT INTO incident (service_id, title, severity, fingerprint, symptom, detected_at, embedding) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-            (sid, name, severity, fp, summary, fired, vec)).fetchone()["id"]
+            "INSERT INTO incident (service_id, service_name, title, severity, fingerprint, symptom, detected_at, embedding) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+            (sid, check_name(service), name, severity, fp, summary, fired, vec)).fetchone()["id"]
         created = True
     alert_id = conn.execute(
         "INSERT INTO alert (service_id, incident_id, source, name, severity, summary, labels, fired_at) "

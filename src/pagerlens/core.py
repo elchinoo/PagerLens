@@ -34,6 +34,7 @@ PERMISSIONS = {
     "simulator:run": "trigger or reset the lab simulator (replaces the telemetry of the demo fleet)",
     "ingest:write": "push telemetry: logs, metrics, deploys, services, alerts and OTLP",
     "metrics:scrape": "scrape /metrics",
+    "services:retire": "retire a service: delete it with its telemetry and close its open incidents (administrators only)",
     "settings:manage": "provider accounts, embeddings, API tokens, the vault and the admin password",
     "mcp:use": "use the MCP server (what it may do follows from the other permissions)",
 }

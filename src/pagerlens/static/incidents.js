@@ -2,7 +2,7 @@ import { api } from "/kit/api.js";
 import { LABELS, lineChart } from "/static/charts.js";
 import { renderMarkdown } from "/static/markdown.js";
 import { can } from "/kit/session.js";
-import { $, fill, h, setBusy, toast } from "/kit/ui.js";
+import { $, field, fill, h, setBusy, toast } from "/kit/ui.js";
 
 const CATEGORY_NAMES = {
   bad_deploy: "Bad deploy", db_saturation: "Database saturation", resource_exhaustion: "Resource exhaustion",
@@ -46,27 +46,81 @@ function putDrafts(box, drafts) {
   }
 }
 
+// The list is a shell (filters and the bulk-resolve form) plus a results area. Loading a filter redraws only the results, so
+// the reason being typed and the filter fields are never wiped.
+const list = { status: "", service: "", picked: new Set(), rows: [], total: 0, shell: null };
+
 async function renderList(box) {
-  fill(box, h("p", { class: "loading" }, "Loading incidents…"));
+  if (!list.shell || list.shell.box !== box || box.children[0] !== list.shell.root) list.shell = buildListShell(box);
+  await loadList();
+}
+
+function buildListShell(box) {
+  const results = h("div", {});
+  const status = h("select", { id: "inc-status", "aria-label": "Status", onchange: (e) => { list.status = e.target.value; list.picked.clear(); loadList(); } },
+    ...[["", "All statuses"], ["open", "Open"], ["investigating", "Investigating"], ["resolved", "Resolved"]].map(([v, t]) => h("option", { value: v }, t)));
+  status.value = list.status;
+  const service = h("input", { id: "inc-service", type: "search", placeholder: "Service name…", value: list.service, "aria-label": "Service",
+    onchange: (e) => { list.service = e.target.value.trim(); list.picked.clear(); loadList(); } });
+  const reason = h("input", { id: "bulk-reason", maxlength: "500", placeholder: "e.g. alert storm after the city was removed", "aria-label": "Reason" });
+  const confirmBox = h("input", { id: "bulk-confirm", type: "checkbox" });
+  const err = h("p", { class: "error", role: "alert" });
+  const bulk = async (body, label) => {
+    err.textContent = "";
+    if (!reason.value.trim()) { err.textContent = "Write the reason first."; return; }
+    if (!confirmBox.checked) { err.textContent = "Tick the confirmation: these incidents will be closed."; return; }
+    try {
+      const r = await api("/api/incidents/bulk-resolve", { method: "POST", json: { ...body, reason: reason.value.trim(), confirm: true } });
+      toast(`${r.resolved} incident${r.resolved === 1 ? "" : "s"} resolved (${label})`);
+      reason.value = ""; confirmBox.checked = false; list.picked.clear();
+      loadList();
+    } catch (ex) { err.textContent = ex.message; }
+  };
+  const selected = h("button", { class: "secondary", type: "button", id: "bulk-selected", onclick: () => bulk({ ids: [...list.picked] }, "selected") }, "Resolve selected");
+  const matching = h("button", { class: "danger", type: "button", id: "bulk-matching", onclick: () => bulk({ all_matching: true, status: list.status === "open" || list.status === "investigating" ? list.status : null, service: list.service || null }, "all matching") }, "Resolve all matching");
+  const panel = can("incidents:write") ? h("details", { class: "card help bulk", id: "bulk-details" }, h("summary", {}, "Resolve many incidents"),
+    h("p", { class: "muted" }, "Closes the selected incidents, or every unresolved incident that matches the filters above, with your reason. A bulk resolution is recorded as a note on each incident and teaches the memory nothing."),
+    field("Reason", reason),
+    h("label", { class: "check inline", for: "bulk-confirm" }, confirmBox, " I understand these incidents will be closed"),
+    h("div", { class: "btns" }, selected, matching), err) : null;
+  const root = h("div", {},
+    h("div", { class: "row" }, h("h1", {}, "Incidents"), h("a", { class: "button-link", href: "#lab" }, "Break something in the Lab")),
+    h("div", { class: "toolbar" }, status, service), panel, results);
+  fill(box, root);
+  return { box, root, results, matching, selected };
+}
+
+async function loadList() {
+  const { results, matching, selected } = list.shell;
+  const q = new URLSearchParams({ ...(list.status ? { status: list.status } : {}), ...(list.service ? { service: list.service } : {}) });
   let data;
-  try { data = await api("/api/incidents"); } catch (err) { fill(box, h("p", { class: "error" }, err.message)); return; }
-  const rows = data.incidents;
-  fill(box,
-    h("div", { class: "row" }, h("h1", {}, "Incidents"),
-      h("a", { class: "button-link", href: "#lab" }, "Break something in the Lab")),
+  try { data = await api(`/api/incidents${q.toString() ? "?" + q : ""}`); } catch (err) { fill(results, h("p", { class: "error" }, err.message)); return; }
+  list.rows = data.incidents; list.total = data.total ?? data.incidents.length;
+  const unresolved = list.status === "resolved" ? 0 : list.total;
+  matching.textContent = `Resolve all matching${list.status === "resolved" ? "" : ` (up to ${unresolved})`}`;
+  matching.disabled = list.status === "resolved";
+  const syncPicked = () => { selected.textContent = `Resolve selected (${list.picked.size})`; selected.disabled = !list.picked.size; };
+  syncPicked();
+  const rows = list.rows;
+  const cause = (r) => (r.root_cause_category ? `Resolved: ${CATEGORY_NAMES[r.root_cause_category] || r.root_cause_category}`
+    : r.status === "resolved" && r.root_cause_note ? `Resolved: ${r.root_cause_note}` : (r.top_hypothesis || h("span", { class: "muted" }, "not investigated")));
+  fill(results,
     rows.length ? h("div", { class: "card flush" }, h("table", {},
-      h("thead", {}, h("tr", {}, ...["", "Incident", "Service", "Status", "Likely cause", "Detected"].map((t) => h("th", {}, t)))),
+      h("thead", {}, h("tr", {}, ...["", "", "Incident", "Service", "Status", "Likely cause", "Detected"].map((t) => h("th", {}, t)))),
       h("tbody", {}, ...rows.map((r) => h("tr", { class: "clickable", tabindex: "0", onclick: () => { location.hash = `#incidents/${r.id}`; },
         onkeydown: (e) => { if (e.key === "Enter") location.hash = `#incidents/${r.id}`; } },
+        h("td", { class: "pick", onclick: (e) => e.stopPropagation() }, r.status === "resolved" ? null : h("input", { type: "checkbox", "aria-label": `Select incident ${r.id}`, checked: list.picked.has(r.id),
+          onchange: (e) => { if (e.target.checked) list.picked.add(r.id); else list.picked.delete(r.id); syncPicked(); } })),
         h("td", {}, h("span", { class: sevClass(r.severity) }, r.severity)),
         h("td", { class: "title" }, h("a", { href: `#incidents/${r.id}` }, r.title)),
         h("td", {}, r.service),
         h("td", {}, h("span", { class: `badge status ${r.status}` }, r.status)),
-        h("td", {}, r.root_cause_category ? `Resolved: ${CATEGORY_NAMES[r.root_cause_category] || r.root_cause_category}` : (r.top_hypothesis || h("span", { class: "muted" }, "not investigated"))),
+        h("td", {}, cause(r)),
         h("td", {}, when(r.detected_at))))))) :
-      h("div", { class: "card empty" }, h("p", {}, "No incidents yet."),
+      h("div", { class: "card empty" }, h("p", {}, list.status || list.service ? "No incident matches these filters." : "No incidents yet."),
         h("p", { class: "muted" }, "Open the Lab to break the demo shop, or send an alert to the webhook (see Fleet)."),
-        h("a", { class: "button-link", href: "#lab" }, "Go to the Lab")));
+        h("a", { class: "button-link", href: "#lab" }, "Go to the Lab")),
+    list.total > rows.length ? h("p", { class: "hint" }, `Showing the latest ${rows.length} of ${list.total}.`) : null);
 }
 
 async function renderDetail(box, id, soft = false) {
@@ -118,7 +172,7 @@ async function renderDetail(box, id, soft = false) {
     h("div", { class: "row" }, h("h1", {}, inc.title),
       h("span", { class: "badges" }, h("span", { class: sevClass(inc.severity) }, inc.severity), h("span", { class: `badge status ${inc.status}` }, inc.status))),
     h("p", { class: "muted" }, `${inc.service} · detected ${when(inc.detected_at)} · ${inc.symptom}`),
-    inc.status === "resolved" ? h("div", { class: "banner ok" }, `Resolved as ${CATEGORY_NAMES[inc.root_cause_category] || inc.root_cause_category}${inc.root_cause_note ? ": " + inc.root_cause_note : ""}. This incident is now memory for future investigations.`) : null,
+    inc.status === "resolved" ? h("div", { class: "banner ok" }, (inc.root_cause_category ? `Resolved as ${CATEGORY_NAMES[inc.root_cause_category] || inc.root_cause_category}${inc.root_cause_note ? ": " + inc.root_cause_note : ""}. This incident is now memory for future investigations.` : `Resolved: ${inc.root_cause_note || "no reason recorded"}. It was closed without a confirmed cause, so it is not memory.`)) : null,
     can("incidents:investigate") ? h("div", { class: "btns wrap" }, h("label", { class: "sr", for: "inv-mode" }, "Method"), mode, acct, go,
       h("label", { class: "check inline", for: "use-memory" }, memory, " Use memory of resolved incidents")) : null,
     can("incidents:investigate") ? acctNote : null,

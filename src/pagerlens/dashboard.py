@@ -6,6 +6,8 @@ A service's status is derived from what it reports, never configured:
   stale     it has reported before but nothing arrived for 5 minutes
   unknown   it has never reported
   healthy   none of the above
+Separately, a service with no data for `stale_after_minutes` (a setting) is marked stale: it carries `stale: true`, and a
+degraded one is reported as stale so it no longer counts in the "N degraded" headline.
 """
 from datetime import UTC, datetime, timedelta
 
@@ -30,6 +32,11 @@ THRESHOLDS = (
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def is_stale(last_seen: datetime | None, now: datetime, stale_after_minutes: int | None) -> bool:
+    """Reported before, but nothing for `stale_after_minutes` (0 or None: never stale)."""
+    return bool(stale_after_minutes) and last_seen is not None and now - last_seen > timedelta(minutes=stale_after_minutes)
 
 
 def judge(latest: dict[str, tuple[float, datetime]], incidents: list[dict], now: datetime | None = None) -> tuple[str, list[str]]:
@@ -102,7 +109,7 @@ def series(conn, service_id: int, names: list[str], minutes: int) -> dict[str, l
     return out
 
 
-def overview(conn) -> dict:
+def overview(conn, stale_after_minutes: int | None = None) -> dict:
     """Every monitored service with its verdict, headline numbers and sparklines, worst first."""
     now = _now()
     services = conn.execute("SELECT id, name, owner, tier, description, depends_on FROM service ORDER BY name").fetchall()
@@ -111,12 +118,16 @@ def overview(conn) -> dict:
     for s in services:
         mine, inc = latest.get(s["id"], {}), incidents.get(s["id"], [])
         status, reasons = judge(mine, inc, now)
+        last_seen = max((ts for _, ts in mine.values()), default=None)
+        stale = is_stale(last_seen, now, stale_after_minutes)
+        if stale and status == "degraded":      # an old open incident on a silent service is not a live problem
+            status, reasons = "stale", [f"no data for {int((now - last_seen).total_seconds() // 60)} min", *reasons]
         names = [m for m in CARD_METRICS if m in mine][:3]
         cards.append({
             "name": s["name"], "owner": s["owner"], "tier": s["tier"], "description": s["description"],
-            "depends_on": s["depends_on"], "status": status, "reasons": reasons,
+            "depends_on": s["depends_on"], "status": status, "stale": stale, "reasons": reasons,
             "open_incidents": len(inc), "worst_severity": min((i["severity"] for i in inc), key=lambda x: SEVERITY_RANK.get(x, 9), default=None),
-            "last_seen": max((ts for _, ts in mine.values()), default=None),
+            "last_seen": last_seen,
             "latest": {n: v for n, (v, _) in mine.items()},
             "sparks": series(conn, s["id"], names, 60),
         })
@@ -125,7 +136,7 @@ def overview(conn) -> dict:
     return {"summary": {**counts, "services": len(cards), "open_incidents": sum(c["open_incidents"] for c in cards)}, "services": cards}
 
 
-def service_detail(conn, name: str, minutes: int) -> dict | None:
+def service_detail(conn, name: str, minutes: int, stale_after_minutes: int | None = None) -> dict | None:
     """Everything about one service: verdict, every metric as a series, incidents, deploys, error signatures, neighbours."""
     s = conn.execute("SELECT id, name, owner, tier, description, depends_on, created_at FROM service WHERE name=%s", (name,)).fetchone()
     if not s:
@@ -164,6 +175,7 @@ def service_detail(conn, name: str, minutes: int) -> dict | None:
     used_by = [neighbour(r["name"], "used by") for r in conn.execute(
         "SELECT name FROM service WHERE %s = ANY(depends_on) ORDER BY name", (name,))]
     return {"name": s["name"], "owner": s["owner"], "tier": s["tier"], "description": s["description"], "created_at": s["created_at"],
-            "status": status, "reasons": reasons, "minutes": minutes, "data_since": since, "bucket_seconds": _bucket_seconds(minutes),
+            "status": status, "stale": is_stale(max((ts for _, ts in mine.values()), default=None), now, stale_after_minutes),
+            "reasons": reasons, "minutes": minutes, "data_since": since, "bucket_seconds": _bucket_seconds(minutes),
             "metrics": metrics, "incidents": incidents, "deploys": deploys, "signatures": signatures,
             "log_counts": {"errors": logs["errors"], "total": logs["total"]}, "neighbours": depends + used_by}

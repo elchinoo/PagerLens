@@ -84,9 +84,9 @@ def similar_incidents(conn, text: str, *, exclude_id: int | None = None, limit: 
         return []
     return conn.execute(
         """
-        SELECT i.id, i.title, i.symptom, i.root_cause_category, i.root_cause_note, s.name AS service,
+        SELECT i.id, i.title, i.symptom, i.root_cause_category, i.root_cause_note, COALESCE(s.name, i.service_name) AS service,
                i.resolved_at, 1 - (i.embedding <=> %(vec)s) AS similarity
-        FROM incident i JOIN service s ON s.id = i.service_id
+        FROM incident i LEFT JOIN service s ON s.id = i.service_id
         WHERE i.status = 'resolved' AND i.root_cause_category IS NOT NULL AND i.embedding IS NOT NULL
           AND (%(ex)s::bigint IS NULL OR i.id <> %(ex)s)
           AND 1 - (i.embedding <=> %(vec)s) >= %(min)s
@@ -98,7 +98,8 @@ def similar_incidents(conn, text: str, *, exclude_id: int | None = None, limit: 
 
 def remember_incident(conn, incident_id: int, signatures: list[str]) -> None:
     """Re-embed an incident with its error signatures so future recall matches on what the logs said."""
-    row = conn.execute("SELECT i.symptom, s.name FROM incident i JOIN service s ON s.id=i.service_id WHERE i.id=%s",
+    row = conn.execute("SELECT i.symptom, COALESCE(s.name, i.service_name) AS name FROM incident i "
+                       "LEFT JOIN service s ON s.id=i.service_id WHERE i.id=%s",
                        (incident_id,)).fetchone()
     if row:
         text = f"{row['name']}: {row['symptom']} | " + " | ".join(signatures[:6])

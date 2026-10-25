@@ -2,6 +2,8 @@ import { api } from "/kit/api.js";
 import { metricLabel, seriesChart } from "/static/charts.js";
 import { $, fill, h } from "/kit/ui.js";
 import { ago, dot } from "/static/dashboard.js";
+import { can } from "/kit/session.js";
+import { retirePanel } from "/static/retire.js";
 
 const RANGES = [[15, "15 min"], [60, "1 hour"], [360, "6 hours"], [1440, "24 hours"]];
 const STATUS_LABEL = { down: "Down", degraded: "Degraded", stale: "No data", unknown: "Unknown", healthy: "Healthy" };
@@ -10,7 +12,23 @@ let timer = null;
 
 const when = (s) => (s ? new Date(s).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "");
 
+// The page is a shell plus a content area. The 10 s refresh redraws only the content; the "Retire service" confirmation sits
+// in the shell, so what is typed in it (and its focus, and whether it is open) is never touched.
+let shell = null;
+
+function ensureShell(box, name) {
+  if (shell && shell.box === box && shell.name === name && box.children[0] === shell.root) return shell;
+  const content = h("div", {});
+  const retire = can("services:retire") ? h("details", { class: "card help", id: "retire-details" }, h("summary", {}, "Retire service"),
+    retirePanel(name, { onDone: () => { location.hash = "#dashboard"; } })) : null;
+  const root = h("div", {}, content, retire);
+  fill(box, root);
+  shell = { box, name, root, content };
+  return shell;
+}
+
 function render(box, name, d) {
+  const { content } = ensureShell(box, name);
   const to = Date.now(), from = to - d.minutes * 60000;
   const markers = [
     ...d.deploys.map((x) => ({ ts: x.deployed_at, kind: "deploy", title: `deploy ${x.version}${x.author ? ` by ${x.author}` : ""}` })),
@@ -25,10 +43,10 @@ function render(box, name, d) {
   });
   const neighbours = d.neighbours.length ? h("div", { class: "chips" }, ...d.neighbours.map((n) =>
     h("a", { class: `chip link ${n.status}`, href: `#service/${n.name}`, title: n.reasons.join(", ") || STATUS_LABEL[n.status] }, dot(n.status), ` ${n.relation} ${n.name}`))) : null;
-  fill(box,
+  fill(content,
     h("a", { href: "#dashboard" }, "← all systems"),
     h("div", { class: `status-banner ${d.status === "stale" || d.status === "unknown" ? "degraded" : d.status}` },
-      h("div", {}, h("h1", {}, dot(d.status), " ", d.name, h("span", { class: "state-word" }, ` ${STATUS_LABEL[d.status]}`)),
+      h("div", {}, h("h1", {}, dot(d.status), " ", d.name, h("span", { class: "state-word" }, ` ${STATUS_LABEL[d.status]}`), d.stale ? h("span", { class: "badge stale" }, "stale") : null),
         d.description ? h("p", { class: "muted" }, d.description) : null,
         d.reasons.length ? h("ul", {}, ...d.reasons.map((r) => h("li", {}, r))) : h("p", { class: "muted" }, "Every signal is within its normal range.")),
       h("dl", { class: "facts" }, h("dt", {}, "Tier"), h("dd", {}, d.tier || "–"), h("dt", {}, "Owner"), h("dd", {}, d.owner || "–"),

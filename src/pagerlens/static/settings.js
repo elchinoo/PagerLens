@@ -2,7 +2,43 @@ import { api } from "/kit/api.js";
 import { $, copy, field, fill, fmtDate, h, toast } from "/kit/ui.js";
 
 export async function initSettings() {
-  await Promise.all([renderAccounts(), renderSecurity()]);
+  await Promise.all([renderAccounts(), renderSecurity(), renderHousekeeping()]);
+}
+
+// ---- stale and auto-resolve ---------------------------------------------------------------------
+// Built once. Settings is redrawn after an account is saved or deleted; this card is not, so a number being typed is never
+// wiped. A later visit only refreshes the fields that were not touched and do not have the focus.
+async function renderHousekeeping() {
+  const box = $("settings-housekeeping");
+  let cur;
+  try { cur = await api("/api/settings/housekeeping"); } catch (err) { if (!box.children.length) box.replaceChildren(h("p", { class: "error" }, err.message)); return; }
+  const fields = box.hk;
+  if (fields) {
+    for (const [key, el] of Object.entries(fields)) if (!el.dirty && document.activeElement !== el) el.value = String(cur[key]);
+    return;
+  }
+  const auto = h("input", { id: "hk-auto", type: "number", min: "0", max: String(cur.limits.auto_resolve_minutes[1]), step: "1", value: String(cur.auto_resolve_minutes) });
+  const stale = h("input", { id: "hk-stale", type: "number", min: "0", max: String(cur.limits.stale_after_minutes[1]), step: "1", value: String(cur.stale_after_minutes) });
+  for (const el of [auto, stale]) el.addEventListener("input", () => { el.dirty = true; });
+  const err = h("p", { class: "error", role: "alert" });
+  box.hk = { auto_resolve_minutes: auto, stale_after_minutes: stale };
+  fill(box,
+    h("h2", {}, "Stale services and recovered incidents"),
+    h("p", { class: "muted" }, "Keeps the dashboard from looking like an alert storm. Both settings apply at once and need no restart."),
+    h("form", { class: "card", onsubmit: async (e) => {
+      e.preventDefault();
+      err.textContent = "";
+      try {
+        const saved = await api("/api/settings/housekeeping", { method: "PUT", json: { auto_resolve_minutes: Number(auto.value), stale_after_minutes: Number(stale.value) } });
+        auto.value = String(saved.auto_resolve_minutes); stale.value = String(saved.stale_after_minutes);
+        auto.dirty = stale.dirty = false;
+        toast("Settings saved");
+      } catch (ex) { err.textContent = ex.message; }
+    } },
+    h("div", { class: "grid2" },
+      field("Auto-resolve after (minutes)", auto, "An open incident nobody has touched is resolved when its alert has been quiet and the service healthy for this long. 0 turns it off."),
+      field("Mark stale after (minutes)", stale, `A service with no data for this long gets a stale badge and leaves the degraded count. 0 turns it off, otherwise at least ${cur.min_stale}.`)),
+    h("div", { class: "btns" }, h("button", { class: "primary", type: "submit" }, "Save")), err));
 }
 
 // ---- provider accounts --------------------------------------------------------------------------

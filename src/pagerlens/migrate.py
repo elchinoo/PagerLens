@@ -86,7 +86,7 @@ def _batch(conn, table: str, last: int, force: bool) -> tuple[list[int], list[st
         return [r["id"] for r in rows], [f"{r['title']}. {r['body']}"[:4000] for r in rows]
     flt = "" if force else "AND i.embedding IS NULL"
     rows = conn.execute(
-        "SELECT i.id, i.title, i.symptom, s.name AS service FROM incident i JOIN service s ON s.id = i.service_id "
+        "SELECT i.id, i.title, i.symptom, COALESCE(s.name, i.service_name) AS service FROM incident i LEFT JOIN service s ON s.id = i.service_id "
         f"WHERE i.id > %s {flt} ORDER BY i.id LIMIT %s", (last, BATCH)).fetchall()  # noqa: S608
     sigs: dict[int, list[str]] = {r["id"]: [] for r in rows}
     seen: dict[int, int] = {}

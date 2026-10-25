@@ -177,6 +177,27 @@ Secrets are only ever read from the environment variables named in the config; U
 
 PagerLens, TrustDesk and CityPulse expose Prometheus metrics at `/metrics` with the same names (`http_requests_total`, `http_request_duration_seconds`, `db_up`, `app_info`, `process_*`). The endpoint needs a **Metrics** token, which can read nothing else and is refused on `/mcp`.
 
+## Keeping the dashboard clean
+
+Stale services, forgotten incidents and alert storms are handled in four ways. None of them teaches the memory: an incident only becomes memory when a person confirms a cause. Everything below resolves with a note and **no cause**, so nothing is embedded or recalled from it.
+
+**Retire a service.** `POST /api/services/{name}/retire` with `{"confirm": "<name>"}` (the exact name, typed; anything else is refused). It needs the `services:retire` permission, which only administrators and `full` tokens hold, and like every write it needs the CSRF header from a browser session. It deletes the service with its metric points, log events, deploys and dependency edges (other services that depended on it lose the edge), and resolves its open incidents as `service retired`. Those incidents stay as history under the service's name; they are not deleted and not remembered. The response counts what was removed. In the UI: **Retire service** on a service page, and on the dashboard card of a stale service, each asking you to type the name. **Telemetry that arrives later for a retired name simply creates the service again**, empty (retire it again if that was a mistake). The OTLP version baseline of the service is forgotten too, so its first new version is not reported as a deploy.
+
+**Resolve many incidents.** `POST /api/incidents/bulk-resolve` (permission `incidents:write`, like a single resolve). Send `reason` (required), `confirm: true` (without it the request is refused and nothing changes) and either `ids` (the selected incidents) or `all_matching: true` with an optional `status` (`open` or `investigating`) and `service`, which resolves every unresolved incident matching that filter, not only the 50 on screen. Already resolved incidents are skipped. Each incident gets `bulk resolved: <reason>` as its resolution note and a note saying who did it. The incident list has the same filters (`GET /api/incidents?status=&service=`, which also returns `total`), a checkbox per incident and a **Resolve many incidents** panel with the confirmation.
+
+**Auto-resolve recovered incidents.** A background pass runs every minute in every web process (one at a time across replicas; `PAGERLENS_HOUSEKEEPING=false` turns the thread off for a process). With `auto_resolve_minutes` set (default 30, `0` = off) it resolves an incident with the note `auto-resolved: recovered` when **all** of these hold:
+
+- its status is `open`: an incident anyone has investigated is `investigating` and is left alone;
+- nobody has touched it: no note, and no investigation run of any kind (there is no assignment feature in PagerLens; a note is how a person claims one);
+- its alert has not re-fired: its newest alert (its detection, if it has none) is at least `auto_resolve_minutes` old;
+- its service is healthy: it reported without a gap longer than 5 minutes across the whole last `auto_resolve_minutes`, and not one data point in that window was over a limit the dashboard uses (`up`, `db_up` or `sandbox_running` at 0, error rate, CPU, memory, fleet health, overload, offline, fault or reject shares). A service with no data, a service that only just came back, or one that went silent for a while never qualifies.
+
+Every condition is checked again inside the update, so a note or an investigation added a moment earlier is never overridden. Anything not on this list (a custom alert about something the metrics do not show) resolves when the service looks healthy and the alert is quiet; if that is too eager for you, raise the minutes or turn it off.
+
+**Stale services.** A service whose newest metric point is older than `stale_after_minutes` (default 60, `0` = off, otherwise at least 5) gets `stale: true` and a **stale** badge. If it would be shown as degraded (for instance because of an open incident nobody will ever close) it is reported as stale instead, so it leaves the "N degraded" headline and the degraded chip; its incidents still count in the open-incident total until they are resolved or the service is retired. A service that never reported is `unknown`, not stale.
+
+Both numbers live in **Settings** and in `GET`/`PUT /api/settings/housekeeping` (`{"auto_resolve_minutes": 30, "stale_after_minutes": 60}`, either key optional, permission `settings:manage`). They apply immediately and are stored with the other instance settings.
+
 ## How secrets are handled
 
 Files full of credentials are the usual way these tools leak, so PagerLens avoids them:
@@ -224,7 +245,7 @@ Credentials that are not people map onto the same permissions through scopes. Lo
 | `pagerlens.metrics` | identity-provider service scope | the same as a `metrics` token |
 
 Behind the roles and scopes are these permissions (see `src/pagerlens/core.py`): `dashboard:read`, `incidents:read`, `runbooks:read`,
-`incidents:investigate`, `incidents:write` (notes, resolve, root cause), `simulator:run`, `ingest:write`, `metrics:scrape`,
+`incidents:investigate`, `incidents:write` (notes, resolve, bulk resolve, root cause), `services:retire` (admin only), `simulator:run`, `ingest:write`, `metrics:scrape`,
 `settings:manage` (accounts, tokens, vault, admin password) and `mcp:use`. A note added by a signed-in person carries their name.
 
 ## Using the MCP server
@@ -474,6 +495,7 @@ Notes:
 | `PAGERLENS_ALLOW_PRIVATE_LLM_URLS` | `false` | Allow provider URLs on loopback/private networks, for a local model server. Link-local is always blocked. |
 | `PAGERLENS_API_KEY` | none | Optional static full-access credential for automation (file alternative: `/etc/pagerlens/api_key`). Prefer API tokens. |
 | `PAGERLENS_ALLOW_ANONYMOUS` | `false` | `true` disables authentication entirely. Throwaway local demos only. |
+| `PAGERLENS_HOUSEKEEPING` | `true` | `false` stops this process's background auto-resolve thread. The runtime switch is the `auto_resolve_minutes` setting (0 = off). |
 | `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_CHAT_MODEL`, `EMBEDDING_MODEL`, `EMBEDDING_DIM` | none | Optional environment provider: embeddings for retrieval, and the `env` chat account for the AI methods. The vector columns are created for `EMBEDDING_DIM` (default 768) on first start; if you change it later, the next start resizes them and re-embeds (see below). Without a provider a built-in offline hashing embedder is used: it matches words, not meaning. |
 
 **Changing `EMBEDDING_DIM` (or the model) on an existing database.** Stored vectors are derived data and cannot be converted between sizes. At startup, before anything else, PagerLens compares the size of `incident.embedding` and `runbook.embedding` with the configured one. If they differ it drops the two HNSW indexes, resizes the columns (`USING NULL`) and recreates the indexes in one transaction, then re-embeds every runbook (title + body) and incident (symptom, plus the stored error signatures once investigated or resolved) in batches. Notes:

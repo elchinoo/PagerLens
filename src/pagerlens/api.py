@@ -19,6 +19,7 @@ from . import (
     core,
     dashboard,
     embedcfg,
+    housekeeping,
     incidents,
     ingest,
     investigator,
@@ -77,8 +78,12 @@ def _startup_tasks() -> None:
 @contextlib.asynccontextmanager
 async def lifespan(_: FastAPI):
     _startup_tasks()
-    async with mcp_app.router.lifespan_context(mcp_app):
-        yield
+    housekeeping.start_background()
+    try:
+        async with mcp_app.router.lifespan_context(mcp_app):
+            yield
+    finally:
+        housekeeping.stop_background()
 
 
 # --- authentication ---------------------------------------------------------------------------------------
@@ -668,7 +673,7 @@ def get_fleet():
 def get_dashboard():
     """Every monitored service with its verdict and sparklines (see dashboard.py)."""
     with _translate(), connect() as conn:
-        return dashboard.overview(conn)
+        return dashboard.overview(conn, housekeeping.settings(conn)["stale_after_minutes"])
 
 
 @app.get("/api/services/{name}", dependencies=[Depends(require("dashboard:read"))])
@@ -676,17 +681,84 @@ def get_service(name: str, minutes: int = Query(60, ge=5, le=1440)):
     if not ingest.NAME.match(name):
         raise HTTPException(404, "no such service")
     with _translate(), connect() as conn:
-        detail = dashboard.service_detail(conn, name, minutes)
+        detail = dashboard.service_detail(conn, name, minutes, housekeeping.settings(conn)["stale_after_minutes"])
     if detail is None:
         raise HTTPException(404, "no such service")
     return detail
 
 
+class RetireBody(BaseModel):
+    confirm: str = Field(max_length=63)
+
+
+@app.post("/api/services/{name}/retire")
+def retire_service(name: str, body: RetireBody, principal=Depends(require("services:retire"))):
+    """Delete a service with its metric points, log events, deploys and dependency edges; resolve its open incidents as
+    `service retired` without teaching the memory. `confirm` must repeat the service name. Telemetry sent later for the
+    same name creates the service again."""
+    if not ingest.NAME.match(name):
+        raise HTTPException(404, "no such service")
+    if body.confirm != name:
+        raise HTTPException(422, "confirm must be the exact name of the service")
+    actor = principal.actor if principal.source == "oidc" else "operator"
+    with _translate(), connect() as conn:
+        result = housekeeping.retire_service(conn, name, actor=actor)
+        conn.commit()
+    return result
+
+
+class HousekeepingBody(BaseModel):
+    auto_resolve_minutes: int | None = None
+    stale_after_minutes: int | None = None
+
+
+@app.get("/api/settings/housekeeping", dependencies=[Depends(require("settings:manage"))])
+def get_housekeeping():
+    with connect() as conn:
+        return {**housekeeping.settings(conn), "limits": housekeeping.LIMITS, "min_stale": housekeeping.MIN_STALE}
+
+
+@app.put("/api/settings/housekeeping", dependencies=[Depends(require("settings:manage"))])
+def put_housekeeping(body: HousekeepingBody):
+    with _translate(), connect() as conn:
+        saved = housekeeping.save_settings(conn, body.model_dump())
+        conn.commit()
+    return saved
+
+
 @app.get("/api/incidents", dependencies=[Depends(require("incidents:read"))])
 def list_incidents(status: str | None = Query(None, pattern="^(open|investigating|resolved)$"),
-                   limit: int = Query(50, ge=1, le=200)):
+                   service: str | None = Query(None, max_length=63), limit: int = Query(50, ge=1, le=200)):
     with connect() as conn:
-        return {"incidents": incidents.list_incidents(conn, status=status, limit=limit)}
+        return {"incidents": incidents.list_incidents(conn, status=status, limit=limit, service=service),
+                "total": incidents.count_incidents(conn, status=status, service=service)}
+
+
+class BulkResolveBody(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
+    confirm: bool = False
+    ids: list[int] | None = Field(default=None, max_length=housekeeping.MAX_BULK)
+    status: str | None = Field(default=None, pattern="^(open|investigating)$")
+    service: str | None = Field(default=None, max_length=63)
+    all_matching: bool = False
+
+
+@app.post("/api/incidents/bulk-resolve")
+def bulk_resolve_incidents(body: BulkResolveBody, principal=Depends(require("incidents:write"))):
+    """Resolve the selected incidents (`ids`), or every unresolved one matching `status`/`service` (`all_matching: true`),
+    with a reason and no cause, so the memory learns nothing. Refused unless `confirm` is true."""
+    if not body.confirm:
+        raise HTTPException(422, "confirm must be true: bulk resolution closes every matching incident")
+    if body.ids is None and not body.all_matching:
+        raise HTTPException(422, "send the ids to resolve, or all_matching: true with an optional status and service filter")
+    if body.ids is not None and (body.all_matching or body.status or body.service):
+        raise HTTPException(422, "send either ids or a filter, not both")
+    actor = principal.actor if principal.source == "oidc" else "operator"
+    with _translate(), connect() as conn:
+        result = housekeeping.bulk_resolve(conn, body.reason, ids=body.ids, actor=actor,
+                                           match=None if body.ids is not None else {"status": body.status, "service": body.service})
+        conn.commit()
+    return result
 
 
 @app.get("/api/incidents/{incident_id}", dependencies=[Depends(require("incidents:read"))])

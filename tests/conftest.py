@@ -1,7 +1,11 @@
+import os
+
 import pytest
 from fastapi.testclient import TestClient
 
 from pagerlens import api, embedcfg, vault
+
+os.environ.setdefault("PAGERLENS_HOUSEKEEPING", "false")   # no background thread in tests: they call the pass themselves
 
 
 @pytest.fixture(scope="session")

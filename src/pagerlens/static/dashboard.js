@@ -1,10 +1,12 @@
 import { api } from "/kit/api.js";
 import { metricLabel, sparkline } from "/static/charts.js";
+import { can } from "/kit/session.js";
+import { retirePanel } from "/static/retire.js";
 import { $, fill, h } from "/kit/ui.js";
 
 const STATUS_LABEL = { down: "Down", degraded: "Degraded", stale: "No data", unknown: "Unknown", healthy: "Healthy" };
 const ORDER = ["down", "degraded", "stale", "unknown", "healthy"];
-const state = { data: null, filter: "all", q: "" };
+const state = { data: null, filter: "all", q: "", retiring: null };
 let timer = null;
 
 export const ago = (iso) => {
@@ -15,7 +17,7 @@ export const ago = (iso) => {
 export const dot = (status) => h("span", { class: `dot ${status}`, role: "img", "aria-label": STATUS_LABEL[status] || status });
 const num = (v) => (v == null ? "–" : Math.abs(v) >= 100 ? Math.round(v).toLocaleString() : String(Math.round(v * 10) / 10));
 
-function card(s) {
+function card(s, shellRef) {
   const sparks = Object.entries(s.sparks).map(([name, pts]) => {
     const { title, unit } = metricLabel(name);
     return h("div", { class: "spark" }, h("div", { class: "spark-head" }, h("span", { class: "muted" }, title), h("b", {}, `${num(s.latest[name])}${unit}`)), sparkline(pts, { name }));
@@ -23,12 +25,25 @@ function card(s) {
   return h("a", { class: `svc-card ${s.status}`, href: `#service/${s.name}` },
     h("div", { class: "row" }, h("h3", {}, dot(s.status), " ", s.name),
       h("span", { class: "badges" }, s.tier ? h("span", { class: "badge plain" }, s.tier) : null,
+        s.stale ? h("span", { class: "badge stale", title: "no data for a long time" }, "stale") : null,
         s.open_incidents ? h("span", { class: `badge sev ${s.worst_severity || "sev3"}` }, `${s.open_incidents} open`) : null)),
     h("p", { class: `why ${s.status}` }, s.reasons.length ? s.reasons.join(" · ") : STATUS_LABEL[s.status]),
     sparks.length ? h("div", { class: "sparks" }, ...sparks) : h("p", { class: "muted small-text" }, s.description || "No metrics yet."),
     h("div", { class: "row foot" }, h("span", { class: "muted small-text" }, `last data ${ago(s.last_seen)}`),
-      s.depends_on.length ? h("span", { class: "muted small-text" }, `depends on ${s.depends_on.join(", ")}`) : null));
+      s.depends_on.length ? h("span", { class: "muted small-text" }, `depends on ${s.depends_on.join(", ")}`) : null),
+    s.stale && can("services:retire") ? h("div", { class: "row foot" }, h("button", { class: "danger small", type: "button", onclick: (e) => {
+      e.preventDefault(); e.stopPropagation(); openRetire(shellRef(), s.name);       // the card is a link: do not follow it
+    } }, "Retire service")) : null);
 }
+
+// The confirmation lives in the shell, not in a card: the grid is redrawn every 10 s and would wipe the typed name.
+function openRetire(s, name) {
+  state.retiring = name;
+  s.retire.replaceChildren(retirePanel(name, { onDone: () => { closeRetire(s); load(s.box); }, onCancel: () => closeRetire(s) }));
+  const input = s.retire.querySelector("#retire-confirm");
+  if (input) input.focus();
+}
+function closeRetire(s) { state.retiring = null; s.retire.replaceChildren(); }
 
 // The page is built once: the filter box and the "send your own telemetry" help live in a shell that the 10 s refresh
 // never touches (it would take the focus, the caret and the open <details> away). Only the banner, the chips and the
@@ -36,10 +51,10 @@ function card(s) {
 let shell = null;
 
 function buildShell(box) {
-  const s = { box, banner: h("div", {}), chips: h("div", { class: "chips" }), grid: h("div", {}) };
+  const s = { box, banner: h("div", {}), retire: h("div", {}), chips: h("div", { class: "chips" }), grid: h("div", {}) };
   s.q = h("input", { id: "svc-q", type: "search", placeholder: "Filter services…", value: state.q, "aria-label": "Filter services",
     oninput: (e) => { state.q = e.target.value; drawData(s); } });
-  s.root = h("div", {}, s.banner, h("div", { class: "toolbar" }, s.chips, s.q), s.grid,
+  s.root = h("div", {}, s.banner, s.retire, h("div", { class: "toolbar" }, s.chips, s.q), s.grid,
     h("details", { class: "card help" }, h("summary", {}, "Send your own telemetry"),
       h("p", { class: "muted" }, "Create an ingest-only token under Settings (it can push data but read nothing), then post to the API. Logs are scrubbed of emails, IPs, cards and secrets before they are stored."),
       h("pre", { class: "code" }, h("code", {}, `export PAGERLENS_TOKEN=<ingest token>
@@ -57,6 +72,7 @@ curl -X POST ${location.origin}/api/ingest/alerts \\
 
 function drawData(s) {
   const { summary, services } = state.data;
+  if (state.retiring && !services.some((x) => x.name === state.retiring)) closeRetire(s);      // it is gone (retired here or elsewhere)
   const chips = [["all", `All ${summary.services}`], ...ORDER.filter((k) => summary[k]).map((k) => [k, `${STATUS_LABEL[k]} ${summary[k]}`])].map(([k, t]) =>
     h("button", { type: "button", class: `chip ${state.filter === k ? "active" : ""} ${k}`, onclick: () => { state.filter = k; drawData(s); } }, t));
   const shown = services.filter((x) => (state.filter === "all" || x.status === state.filter) && x.name.includes(state.q.trim().toLowerCase()));
@@ -68,7 +84,7 @@ function drawData(s) {
         h("p", { class: "muted" }, `${summary.services} monitored systems · ${summary.open_incidents} open incident${summary.open_incidents === 1 ? "" : "s"} · refreshes every 10 s`)),
       h("a", { class: "button-link", href: "#incidents" }, "All incidents")));
   fill(s.chips, ...chips);
-  fill(s.grid, shown.length ? h("div", { class: "svc-grid" }, ...shown.map(card)) :
+  fill(s.grid, shown.length ? h("div", { class: "svc-grid" }, ...shown.map((x) => card(x, () => s))) :
     h("div", { class: "card" }, h("p", { class: "empty" }, summary.services ? "No service matches this filter." : "No systems yet. Point pagerlens-agent at your services, push telemetry (Connect tab), or load the demo fleet in the Lab.")));
 }
 
