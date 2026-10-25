@@ -1,4 +1,5 @@
 """The browser code without a browser: every module parses, and the fake-DOM checks under tests/ui pass (needs node and the sibling kit)."""
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -17,7 +18,18 @@ def test_every_ui_module_parses(js):
 
 
 @pytest.mark.skipif(not (ROOT.parent / "agentpg-kit/src/apgkit/static").is_dir(), reason="the sibling agentpg-kit checkout is not present")
-@pytest.mark.parametrize("script", ["dashboard_typing.mjs", "incident_typing.mjs", "housekeeping_typing.mjs"])
+@pytest.mark.parametrize("script", ["dashboard_typing.mjs", "incident_typing.mjs", "housekeeping_typing.mjs", "dialogs.mjs"])
 def test_fake_dom_checks(script):
     r = subprocess.run([NODE, str(ROOT / "tests/ui" / script)], capture_output=True, text=True, timeout=60)
     assert r.returncode == 0 and r.stdout.startswith("ok"), r.stdout + r.stderr
+
+
+NATIVE_DIALOG = re.compile(r"(?<![\w.$])(?:window\.|globalThis\.)?(?:confirm|alert|prompt)\s*\(")
+
+
+def test_no_native_dialogs():
+    """Native confirm()/alert()/prompt() cannot be styled and freeze automated browsers: use confirmDialog/promptDialog/toast."""
+    pages = sorted((ROOT / "src/pagerlens/static").glob("*.js")) + sorted((ROOT / "src/pagerlens/static").glob("*.html"))
+    assert pages
+    found = [f"{p.name}:{n}" for p in pages for n, line in enumerate(p.read_text().splitlines(), 1) if NATIVE_DIALOG.search(line)]
+    assert not found, f"native dialogs in {found}"

@@ -18,8 +18,9 @@ register("data:text/javascript," + encodeURIComponent(loader));
 const contains = (root, el) => root === el || (root.children || []).some((c) => contains(c, el));
 
 class El {
-  constructor(tag) { this.tag = tag; this.children = []; this.attrs = {}; this.dataset = {}; this.value = ""; this.listeners = {}; this.classList = { toggle() {}, add() {}, remove() {} }; this.style = {}; this.textContent = ""; this.open = false; this.selectionStart = null; this.selectionEnd = null; }
-  append(...k) { this.children.push(...k); }
+  constructor(tag) { this.tag = tag; this.children = []; this.attrs = {}; this.dataset = {}; this.value = ""; this.listeners = {}; this.classes = new Set(); this.classList = { toggle() {}, add: (c) => this.classes.add(c), remove: (c) => this.classes.delete(c), contains: (c) => this.classes.has(c) }; this.style = {}; this.textContent = ""; this.className = ""; this.disabled = false; this.parent = null; this.open = false; this.selectionStart = null; this.selectionEnd = null; }
+  append(...k) { for (const x of k) if (x.parent !== undefined) x.parent = this; this.children.push(...k); }
+  remove() { if (this.parent) this.parent.children = this.parent.children.filter((c) => c !== this); this.parent = null; if (document.activeElement && !contains(document.body, document.activeElement)) document.activeElement = null; }
   prepend(...k) { this.children.unshift(...k); }
   replaceChildren(...k) {
     const old = this.children;
@@ -46,11 +47,11 @@ export const findAll = (el, pred) => [...(pred(el) ? [el] : []), ...(el.children
 // Installs the globals and returns helpers. `routes(path, init)` answers every fetch with a JSON body.
 export async function installDom({ hash, routes, perms = ["*"] }) {
   const els = {};
-  globalThis.document = { activeElement: null, hidden: false, documentElement: { dataset: { csrf: "X-PagerLens-CSRF" } }, getElementById: (id) => Object.values(els).map((r) => find(r, (e) => e.attrs?.id === id)).find(Boolean) || (els[id] ||= new El("#" + id)),   // like a page: a created element is found once it is attached
+  globalThis.document = { body: new El("body"), activeElement: null, hidden: false, documentElement: { dataset: { csrf: "X-PagerLens-CSRF" } }, getElementById: (id) => Object.values(els).map((r) => find(r, (e) => e.attrs?.id === id)).find(Boolean) || (els[id] ||= new El("#" + id)),   // like a page: a created element is found once it is attached
     createElement: (t) => new El(t), createElementNS: (_, t) => new El(t), createTextNode: (d) => ({ nodeType: 3, data: d }), querySelectorAll: () => [] };
   globalThis.window = { dispatchEvent() {}, addEventListener() {} };
   globalThis.CustomEvent = class {};
-  globalThis.confirm = () => true;
+  for (const n of ["confirm", "alert", "prompt"]) globalThis[n] = () => { throw new Error(`native ${n}() called`); };   // a native dialog freezes a real browser
   globalThis.location = { origin: "http://x", hash, search: "", pathname: "/" };
   globalThis.fetch = async (p, init) => {
     const body = await routes(p, init || {});

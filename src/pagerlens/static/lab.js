@@ -1,5 +1,5 @@
 import { api } from "/kit/api.js";
-import { $, fill, h, setBusy, toast } from "/kit/ui.js";
+import { $, confirmDialog, fill, h, setBusy, toast } from "/kit/ui.js";
 
 export async function initLab() {
   const box = $("view-lab");
@@ -8,7 +8,7 @@ export async function initLab() {
   try { data = await api("/api/simulator/scenarios"); } catch (err) { fill(box, h("p", { class: "error" }, err.message)); return; }
   const cards = data.scenarios.map((s) => {
     const btn = h("button", { class: "primary", type: "button", onclick: async () => {
-      if (!confirm("This replaces the demo telemetry (logs, metrics, deploys) with a fresh window that contains this failure. Incidents and reports are kept. Continue?")) return;
+      if (!(await confirmDialog("This replaces the demo telemetry (logs, metrics, deploys) with a fresh window that contains this failure. Incidents and reports are kept. Continue?", { title: "Replace demo telemetry", confirmLabel: "Continue", danger: true }))) return;
       setBusy(btn, true, "Breaking the shop…");
       try { const r = await api("/api/simulator/trigger", { method: "POST", json: { scenario: s.key } }); toast("Alert fired"); location.hash = `#incidents/${r.incident_id}`; }
       catch (err) { toast(err.message, true); setBusy(btn, false); }

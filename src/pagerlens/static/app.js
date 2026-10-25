@@ -6,7 +6,7 @@ import { initLab } from "/static/lab.js";
 import { initRunbooks } from "/static/runbooks.js";
 import { initService, stopService } from "/static/service.js";
 import { initSettings } from "/static/settings.js";
-import { can, refreshSession, renderLogin, renderSetup, renderVaultBanner, state } from "/kit/session.js";
+import { bootSession, can, refreshSession, renderLogin, renderSetup, renderVaultBanner, state } from "/kit/session.js";
 import { $, h } from "/kit/ui.js";
 
 const TABS = ["dashboard", "service", "incidents", "runbooks", "lab", "settings", "connect"];
@@ -15,24 +15,20 @@ const SECTIONS = ["auth-card", "vault-banner", "nav", "signout", ...TABS.map((t)
 
 function hideAll() { for (const id of SECTIONS) $(id).hidden = true; }
 
-function showUnavailable(err) {
-  hideAll();
-  $("auth-card").replaceChildren(
-    h("img", { class: "hero-logo", src: "/static/logo.svg", alt: "", width: "72", height: "72" }),
-    h("h1", {}, "PagerLens can't be reached"),
-    h("p", { class: "muted" }, err.message),
-    h("p", { class: "hint" }, "If this server runs on a platform that pauses idle apps, resume it first (for AgentPG: agentpg sandbox resume <sandbox-id>), then retry."),
-    h("button", { class: "primary", type: "button", onclick: () => boot() }, "Retry"));
-  $("auth-card").hidden = false;
-}
+const UNAVAILABLE_HINT = "If this server runs on a platform that pauses idle apps, resume it first (for AgentPG: agentpg sandbox resume <sandbox-id>), then retry.";
 
 async function boot(notice = "") {
   hideAll();
-  let s;
-  try { s = await refreshSession(); } catch (err) { showUnavailable(err); return; }
-  if (s.state === "setup_required") renderSetup(() => boot(), "PagerLens");
-  else if (s.state === "logged_out") renderLogin(() => boot(), notice, "PagerLens");
-  else showApp();
+  // The card shows a loading state, then an error with "Try again", instead of staying blank while the session loads after sign-in.
+  const card = $("auth-card");
+  card.hidden = false;
+  const onReady = (s) => {
+    if (s.state === "setup_required") renderSetup(() => boot(), "PagerLens");
+    else if (s.state === "logged_out") renderLogin(() => boot(), notice, "PagerLens");
+    else showApp();
+  };
+  const s = await bootSession(card, { text: "Loading PagerLens\u2026", onReady });
+  if (!s) card.append(h("p", { class: "hint" }, UNAVAILABLE_HINT));
 }
 
 // What each tab needs; the server enforces it, this only hides what a role would be refused.

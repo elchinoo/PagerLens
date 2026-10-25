@@ -1,5 +1,5 @@
 import { api } from "/kit/api.js";
-import { $, copy, field, fill, fmtDate, h, toast } from "/kit/ui.js";
+import { $, confirmDialog, copy, field, fill, fmtDate, h, toast } from "/kit/ui.js";
 
 export async function initSettings() {
   await Promise.all([renderAccounts(), renderSecurity(), renderHousekeeping()]);
@@ -90,7 +90,7 @@ function accountCard(a, data, reload, edit) {
       a.chat_model ? h("button", { class: "secondary small", type: "button", onclick: test("chat") }, "Test chat") : null,
       a.read_only ? null : h("button", { class: "secondary small", type: "button", onclick: () => edit(a) }, "Edit"),
       a.read_only ? null : h("button", { class: "danger small", type: "button", onclick: async () => {
-        if (!confirm(`Delete the account "${a.name}"? Its stored key is erased.`)) return;
+        if (!(await confirmDialog(`Delete the account "${a.name}"? Its stored key is erased.`, { title: "Delete account", confirmLabel: "Delete", danger: true }))) return;
         try { await api(`/api/accounts/${a.id}`, { method: "DELETE" }); toast("Account deleted"); reload(); } catch (err) { toast(err.message, true); }
       } }, "Delete")),
     result);
@@ -175,7 +175,7 @@ async function renderSecurity() {
         h("td", { class: "title" }, t.name), h("td", {}, h("code", {}, `${t.prefix}…`)), h("td", {}, t.scope),
         h("td", {}, fmtDate(t.created_at)), h("td", {}, fmtDate(t.last_used_at)),
         h("td", { class: "actions" }, t.revoked_at ? h("span", { class: "muted" }, "revoked") : h("button", { class: "danger small", type: "button", onclick: async () => {
-          if (!confirm(`Revoke "${t.name}"? Clients using it stop working immediately.`)) return;
+          if (!(await confirmDialog(`Revoke "${t.name}"? Clients using it stop working immediately.`, { title: "Revoke token", confirmLabel: "Revoke", danger: true }))) return;
           try { await api(`/api/tokens/${t.id}`, { method: "DELETE" }); toast("Token revoked"); renderTokenTable(); } catch (err) { toast(err.message, true); }
         } }, "Revoke"))))))) : h("p", { class: "hint" }, "No tokens yet."));
   }

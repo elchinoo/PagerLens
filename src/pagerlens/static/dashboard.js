@@ -2,7 +2,7 @@ import { api } from "/kit/api.js";
 import { metricLabel, sparkline } from "/static/charts.js";
 import { can } from "/kit/session.js";
 import { retirePanel } from "/static/retire.js";
-import { $, fill, h } from "/kit/ui.js";
+import { $, errorState, fill, h, loading } from "/kit/ui.js";
 
 const STATUS_LABEL = { down: "Down", degraded: "Degraded", stale: "No data", unknown: "Unknown", healthy: "Healthy" };
 const ORDER = ["down", "degraded", "stale", "unknown", "healthy"];
@@ -97,7 +97,7 @@ function draw(box) {
 
 async function load(box) {
   try { state.data = await api("/api/dashboard"); } catch (err) {
-    if (!state.data) fill(box, h("p", { class: "error" }, err.message));
+    if (!state.data) errorState(box, err.message, () => { loading(box); load(box); });
     return;
   }
   draw(box);
@@ -106,6 +106,7 @@ async function load(box) {
 export async function initDashboard() {
   const box = $("view-dashboard");
   clearInterval(timer);
+  if (!state.data) loading(box, "Loading services\u2026");
   await load(box);
   timer = setInterval(() => { if (document.hidden) return; if (!location.hash || location.hash === "#dashboard") load(box); else clearInterval(timer); }, 10000);
 }
