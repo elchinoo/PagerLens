@@ -2,7 +2,7 @@ import { api } from "/kit/api.js";
 import { metricLabel, sparkline } from "/static/charts.js";
 import { can } from "/kit/session.js";
 import { retirePanel } from "/static/retire.js";
-import { $, errorState, fill, h, loading } from "/kit/ui.js";
+import { $, errorState, fill, h, loading, scrollRegion } from "/kit/ui.js";
 
 const STATUS_LABEL = { down: "Down", degraded: "Degraded", stale: "No data", unknown: "Unknown", healthy: "Healthy" };
 const ORDER = ["down", "degraded", "stale", "unknown", "healthy"];
@@ -23,7 +23,7 @@ function card(s, shellRef) {
     return h("div", { class: "spark" }, h("div", { class: "spark-head" }, h("span", { class: "muted" }, title), h("b", {}, `${num(s.latest[name])}${unit}`)), sparkline(pts, { name }));
   });
   return h("a", { class: `svc-card ${s.status}`, href: `#service/${s.name}` },
-    h("div", { class: "row" }, h("h3", {}, dot(s.status), " ", s.name),
+    h("div", { class: "row" }, h("h3", { "aria-level": "2" }, dot(s.status), " ", s.name),
       h("span", { class: "badges" }, s.tier ? h("span", { class: "badge plain" }, s.tier) : null,
         s.stale ? h("span", { class: "badge stale", title: "no data for a long time" }, "stale") : null,
         s.open_incidents ? h("span", { class: `badge sev ${s.worst_severity || "sev3"}` }, `${s.open_incidents} open`) : null)),
@@ -57,7 +57,7 @@ function buildShell(box) {
   s.root = h("div", {}, s.banner, s.retire, h("div", { class: "toolbar" }, s.chips, s.q), s.grid,
     h("details", { class: "card help" }, h("summary", {}, "Send your own telemetry"),
       h("p", { class: "muted" }, "Create an ingest-only token under Settings (it can push data but read nothing), then post to the API. Logs are scrubbed of emails, IPs, cards and secrets before they are stored."),
-      h("pre", { class: "code" }, h("code", {}, `export PAGERLENS_TOKEN=<ingest token>
+      scrollRegion(h("pre", { class: "code" }, h("code", {}, `export PAGERLENS_TOKEN=<ingest token>
 
 curl -X POST ${location.origin}/api/ingest/metrics \\
   -H "Authorization: Bearer $PAGERLENS_TOKEN" -H "Content-Type: application/json" \\
@@ -65,7 +65,7 @@ curl -X POST ${location.origin}/api/ingest/metrics \\
 
 curl -X POST ${location.origin}/api/ingest/alerts \\
   -H "Authorization: Bearer $PAGERLENS_TOKEN" -H "Content-Type: application/json" \\
-  -d '{"service":"checkout-api","name":"HighErrorRate","summary":"5xx above 5%","severity":"sev2"}'`))));
+  -d '{"service":"checkout-api","name":"HighErrorRate","summary":"5xx above 5%","severity":"sev2"}'`)), "Example ingest commands")));
   fill(box, s.root);
   return s;
 }

@@ -1,7 +1,7 @@
 // Regression: destructive actions ask through the kit's confirmDialog (never a native confirm(), which freezes a browser test),
 // a refresh timer cannot wipe an open dialog, and the dashboard shows loading, then data, or an error with a retry.
 // Run:  node tests/ui/dialogs.mjs        (no browser, no server: a tiny fake DOM and a stubbed fetch)
-import { fail, find, findAll, installDom } from "./fakedom.mjs";
+import { fail, find, findAll, installDom, isInert, modals } from "./fakedom.mjs";
 
 const calls = [];
 let dashboardFails = true, releaseDash;
@@ -23,7 +23,7 @@ const dom = await installDom({ hash: "#lab", routes: async (p, init) => {
   return {};
 } });
 const button = (root, label) => find(root, (e) => e.tag === "button" && (e.children || []).some((c) => c.data === label));
-const overlay = () => find(document.body, (e) => e.className === "confirm-overlay");
+const overlay = () => find(document.body, (e) => e.tag === "dialog" && e.attrs?.role === "alertdialog");   // the kit's native modal <dialog>
 const dlgButton = (label) => find(overlay(), (e) => e.tag === "button" && (e.children || []).some((c) => c.data === label));
 const posted = (path) => calls.some(([m, p]) => m !== "GET" && p === path);
 
@@ -35,12 +35,19 @@ const click = async (el) => { await el.listeners.click[0]({ target: el, preventD
 click(button(lab, "Break it"));
 await dom.settle();
 if (!overlay()) fail("Break it did not open a confirmation dialog");
-if (!find(overlay(), (e) => e.attrs?.role === "alertdialog")) fail("the confirmation is not an alertdialog");
+if (!overlay().open || modals[modals.length - 1] !== overlay()) fail("the confirmation is not open as a modal <dialog> (showModal)");
+if (isInert(dlgButton("Cancel"))) fail("the confirmation's own buttons are inert");
 if (posted("/api/simulator/trigger")) fail("the scenario ran before it was confirmed");
 await dom.tick();
 if (!overlay()) fail("a timer wiped the open dialog");
 await click(dlgButton("Cancel"));
-if (overlay() || posted("/api/simulator/trigger")) fail("Cancel closed wrongly or still ran the scenario");
+if (overlay() || posted("/api/simulator/trigger") || modals.length) fail("Cancel closed wrongly or still ran the scenario");
+click(button(lab, "Break it"));
+await dom.settle();
+// A native Escape fires a cancelable 'cancel' on the dialog: it closes the dialog without running the scenario.
+const escaped = overlay().dispatch("cancel");
+await dom.settle();
+if (!escaped.defaultPrevented || overlay() || modals.length || posted("/api/simulator/trigger")) fail("Escape (native cancel) did not close the confirmation cleanly");
 click(button(lab, "Break it"));
 await dom.settle();
 await click(dlgButton("Continue"));

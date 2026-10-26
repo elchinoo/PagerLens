@@ -4,6 +4,7 @@ import { $, fill, h } from "/kit/ui.js";
 import { ago, dot } from "/static/dashboard.js";
 import { can } from "/kit/session.js";
 import { retirePanel } from "/static/retire.js";
+import { flush } from "/static/regions.js";
 
 const RANGES = [[15, "15 min"], [60, "1 hour"], [360, "6 hours"], [1440, "24 hours"]];
 const STATUS_LABEL = { down: "Down", degraded: "Degraded", stale: "No data", unknown: "Unknown", healthy: "Healthy" };
@@ -56,7 +57,7 @@ function render(box, name, d) {
     charts.length ? h("div", { class: "charts-wide" }, ...charts) : h("div", { class: "card" }, h("p", { class: "empty" }, "This service has not reported any metric yet.")),
     h("p", { class: "hint" }, "Dashed lines mark incidents (orange) and deploys (dotted). Hover a line for details."),
     h("h2", { class: "section-title" }, "Incidents"),
-    d.incidents.length ? h("div", { class: "card flush" }, h("table", {}, h("thead", {}, h("tr", {}, ...["#", "Incident", "Severity", "Status", "Detected", "Cause"].map((t) => h("th", {}, t)))),
+    d.incidents.length ? flush("Incidents of this service", h("table", {}, h("thead", {}, h("tr", {}, ...["#", "Incident", "Severity", "Status", "Detected", "Cause"].map((t) => h("th", {}, t)))),
       h("tbody", {}, ...d.incidents.map((i) => h("tr", { class: "clickable", onclick: () => { location.hash = `#incidents/${i.id}`; } },
         h("td", {}, i.id), h("td", { class: "title" }, i.title), h("td", {}, h("span", { class: `badge sev ${i.severity}` }, i.severity)),
         h("td", {}, h("span", { class: `badge status ${i.status}` }, i.status)), h("td", {}, when(i.detected_at)),
@@ -64,11 +65,11 @@ function render(box, name, d) {
       h("div", { class: "card" }, h("p", { class: "empty" }, "No incidents for this service.")),
     h("div", { class: "panel-grid" },
       h("div", {}, h("h2", { class: "section-title" }, "Recent deploys"),
-        d.deploys.length ? h("div", { class: "card flush" }, h("table", {}, h("tbody", {}, ...d.deploys.map((x) => h("tr", {},
+        d.deploys.length ? flush("Recent deploys", h("table", {}, h("tbody", {}, ...d.deploys.map((x) => h("tr", {},
           h("td", { class: "title" }, x.version), h("td", { class: "muted" }, x.summary || x.author || ""), h("td", {}, when(x.deployed_at))))))) :
           h("div", { class: "card" }, h("p", { class: "empty" }, "No deploys recorded."))),
       h("div", {}, h("h2", { class: "section-title" }, "Top errors and warnings"),
-        d.signatures.length ? h("div", { class: "card flush" }, h("table", {}, h("tbody", {}, ...d.signatures.map((x) => h("tr", {},
+        d.signatures.length ? flush("Top errors and warnings", h("table", {}, h("tbody", {}, ...d.signatures.map((x) => h("tr", {},
           h("td", { class: "wrap-cell" }, h("code", {}, x.signature.slice(0, 110))), h("td", { class: "num" }, `${x.n}×`), h("td", { class: "muted" }, ago(x.last_seen))))))) :
           h("div", { class: "card" }, h("p", { class: "empty" }, "No warnings or errors in the recent logs.")))));
 }

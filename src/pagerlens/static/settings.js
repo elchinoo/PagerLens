@@ -1,4 +1,5 @@
 import { api } from "/kit/api.js";
+import { flush } from "/static/regions.js";
 import { $, confirmDialog, copy, field, fill, fmtDate, h, toast } from "/kit/ui.js";
 
 export async function initSettings() {
@@ -169,7 +170,7 @@ async function renderSecurity() {
   const table = h("div", {});
   async function renderTokenTable() {
     const list = await api("/api/tokens");
-    table.replaceChildren(list.length ? h("div", { class: "card flush" }, h("table", {},
+    table.replaceChildren(list.length ? flush("API tokens", h("table", {},
       h("thead", {}, h("tr", {}, ...["Name", "Token", "Access", "Created", "Last used", ""].map((t) => h("th", {}, t)))),
       h("tbody", {}, ...list.map((t) => h("tr", {},
         h("td", { class: "title" }, t.name), h("td", {}, h("code", {}, `${t.prefix}…`)), h("td", {}, t.scope),

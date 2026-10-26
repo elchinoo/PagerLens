@@ -14,7 +14,7 @@ export async function initLab() {
       catch (err) { toast(err.message, true); setBusy(btn, false); }
     } }, "Break it");
     return h("article", { class: "card acct" },
-      h("div", { class: "row" }, h("h3", {}, s.title), h("span", { class: `badge sev ${s.severity}` }, s.severity)),
+      h("div", { class: "row" }, h("h3", { "aria-level": "2" }, s.title), h("span", { class: `badge sev ${s.severity}` }, s.severity)),
       h("p", { class: "muted" }, s.blurb), h("p", { class: "hint" }, `Alert fires on ${s.service}.`), h("div", { class: "btns" }, btn));
   });
   const reset = h("button", { class: "secondary", type: "button", onclick: async () => {

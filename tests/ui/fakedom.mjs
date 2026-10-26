@@ -15,6 +15,8 @@ const loader = `export async function resolve(s, c, n) {
 }`;
 register("data:text/javascript," + encodeURIComponent(loader));
 
+export const modals = [];   // open modal dialogs, last = topmost
+export const isInert = (el) => { const top = modals[modals.length - 1]; return !!top && !contains(top, el); };
 const contains = (root, el) => root === el || (root.children || []).some((c) => contains(c, el));
 
 class El {
@@ -32,8 +34,15 @@ class El {
   addEventListener(t, f) { (this.listeners[t] ||= []).push(f); }
   focus() { document.activeElement = this; }
   setSelectionRange(a, b) { this.selectionStart = a; this.selectionEnd = b; }
-  showModal() { this.open = true; }
-  close() { this.open = false; }
+  // <dialog>: showModal() makes it the topmost modal (everything outside it is inert), close() pops it; a native Escape is a
+  // cancelable 'cancel' event, which the page must handle itself (the kit calls preventDefault and closes the dialog).
+  showModal() { this.open = true; modals.push(this); this.attrs.open = ""; }
+  close() { this.open = false; const i = modals.indexOf(this); if (i >= 0) modals.splice(i, 1); }
+  dispatch(type, ev = {}) {
+    const e = { target: this, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, ...ev };
+    for (const f of this.listeners[type] || []) f(e);
+    return e;
+  }
   scrollIntoView() {}
   get nodeType() { return 1; }
   querySelector(sel) { return sel.startsWith("#") ? find(this, (e) => e !== this && e.attrs?.id === sel.slice(1)) || null : null; }
@@ -49,6 +58,7 @@ export async function installDom({ hash, routes, perms = ["*"] }) {
   const els = {};
   globalThis.document = { body: new El("body"), activeElement: null, hidden: false, documentElement: { dataset: { csrf: "X-PagerLens-CSRF" } }, getElementById: (id) => Object.values(els).map((r) => find(r, (e) => e.attrs?.id === id)).find(Boolean) || (els[id] ||= new El("#" + id)),   // like a page: a created element is found once it is attached
     createElement: (t) => new El(t), createElementNS: (_, t) => new El(t), createTextNode: (d) => ({ nodeType: 3, data: d }), querySelectorAll: () => [] };
+  modals.length = 0;
   globalThis.window = { dispatchEvent() {}, addEventListener() {} };
   globalThis.CustomEvent = class {};
   for (const n of ["confirm", "alert", "prompt"]) globalThis[n] = () => { throw new Error(`native ${n}() called`); };   // a native dialog freezes a real browser

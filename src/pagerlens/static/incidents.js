@@ -2,7 +2,8 @@ import { api } from "/kit/api.js";
 import { LABELS, lineChart } from "/static/charts.js";
 import { renderMarkdown } from "/static/markdown.js";
 import { can } from "/kit/session.js";
-import { $, field, fill, h, setBusy, toast } from "/kit/ui.js";
+import { flush } from "/static/regions.js";
+import { $, field, fill, h, scrollRegion, setBusy, toast } from "/kit/ui.js";
 
 const CATEGORY_NAMES = {
   bad_deploy: "Bad deploy", db_saturation: "Database saturation", resource_exhaustion: "Resource exhaustion",
@@ -105,7 +106,7 @@ async function loadList() {
   const cause = (r) => (r.root_cause_category ? `Resolved: ${CATEGORY_NAMES[r.root_cause_category] || r.root_cause_category}`
     : r.status === "resolved" && r.root_cause_note ? `Resolved: ${r.root_cause_note}` : (r.top_hypothesis || h("span", { class: "muted" }, "not investigated")));
   fill(results,
-    rows.length ? h("div", { class: "card flush" }, h("table", {},
+    rows.length ? flush("Incidents", h("table", {},
       h("thead", {}, h("tr", {}, ...["", "", "Incident", "Service", "Status", "Likely cause", "Detected"].map((t) => h("th", {}, t)))),
       h("tbody", {}, ...rows.map((r) => h("tr", { class: "clickable", tabindex: "0", onclick: () => { location.hash = `#incidents/${r.id}`; },
         onkeydown: (e) => { if (e.key === "Enter") location.hash = `#incidents/${r.id}`; } },
@@ -213,7 +214,7 @@ async function showObservation(host, id) {
       h("button", { class: "ghost small", type: "button", onclick: () => fill(host) }, "Close")),
       h("p", { class: "muted" }, `${o.summary} · digest ${o.digest}`),
       h("p", { class: "hint" }, "Log text below is untrusted data collected from your services."),
-      h("pre", { class: "code" }, h("code", {}, JSON.stringify(o.payload, null, 2)))));
+      scrollRegion(h("pre", { class: "code" }, h("code", {}, JSON.stringify(o.payload, null, 2))), `Raw evidence of observation #${o.id}`)));
     host.scrollIntoView({ behavior: "smooth", block: "nearest" });
   } catch (err) { toast(err.message, true); }
 }
@@ -230,7 +231,7 @@ function runSection(inc) {
   const host = h("div", {});
   const load = async (runId) => {
     const run = await api(`/api/runs/${runId}`);
-    fill(host, h("div", { class: "card flush" }, h("table", {},
+    fill(host, flush("Investigation steps", h("table", {},
       h("thead", {}, h("tr", {}, ...["#", "Step", "What it found", "Rows", "ms"].map((t) => h("th", {}, t)))),
       h("tbody", {}, ...run.steps.map((s) => h("tr", {}, h("td", {}, s.ord), h("td", {}, h("code", {}, s.tool || (s.kind === "llm" ? "AI turn" : s.kind)), s.args && s.args.service ? ` ${s.args.service}` : ""),
         h("td", {}, s.summary), h("td", { class: "num" }, s.row_count ?? ""), h("td", { class: "num" }, s.ms ?? "")))))));
