@@ -11,6 +11,10 @@ observe = _kit.observe
 render = _kit.render
 INGESTED = Counter("pagerlens_ingested_total", "Telemetry items accepted", ["kind"], registry=REGISTRY)
 ASKED = Counter("pagerlens_ask_total", "Questions asked in Ask PagerLens", ["status"], registry=REGISTRY)
+ASK_TURNS = Counter("pagerlens_ask_turns_total", "Ask turns by outcome: grounded, corrected (grounded after the corrective round), ungrounded",
+                    ["outcome"], registry=REGISTRY)
+for _outcome in ("grounded", "corrected", "ungrounded"):
+    ASK_TURNS.labels(_outcome)
 INVESTIGATIONS = Counter("pagerlens_investigations_total", "Investigations run", ["mode", "status"], registry=REGISTRY)
 
 

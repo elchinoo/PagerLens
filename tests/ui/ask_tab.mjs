@@ -163,5 +163,43 @@ const notice = text(findId(dom.el("view-ask"), "ask-notice"));
 if (!notice.includes("no chat account is configured")) fail("the missing account is not explained: " + notice);
 if (findAll(dom.el("view-ask"), (e) => e.tag === "button" && e.className === "chip").length !== 3) fail("fallback suggestions are missing");
 
-console.log("ok: the Ask tab (suggestions, typing state, verified chips, flagged citations, textContent only, keyboard, retry, persistence)");
+// 11. the verdict badge: "Verified" only for a grounded answer with sources and nothing unverified; everything else says Unverified
+//     out loud, with the server's warning shown prominently (not as a faint hint); all of it text
+click(btn(dom.el("view-ask"), "New conversation"));
+await dom.settle();
+const turnsOf = () => findAll(log(), (e) => String(e.className).startsWith("msg assistant"));
+const badgeOf = (turn) => find(turn, (e) => String(e.className).startsWith("badge verdict"));
+const ask1 = async (q, body) => { script = [{ status: 200, body }]; findId(dom.el("view-ask"), "ask-input").value = q; click(btn(dom.el("view-ask"), "Ask")); await dom.settle(); return turnsOf().at(-1); };
+const src3 = [{ type: "incident", id: 3, ref: "incident #3", label: "HighErrorRate (checkout-api, open)", link: "#incidents/3", verified: true }];
+
+let t = await ask1("good", answer("It was the release [incident #3].", { sources: src3, grounded: true }));
+if (text(badgeOf(t)).trim() !== "Verified" || !String(badgeOf(t).className).includes("verified") || String(t.className).includes("is-unverified")) fail("a grounded answer must carry the Verified badge");
+if (findAll(t, (e) => String(e.className) === "warning-strong").length) fail("a verified answer must not show a warning box");
+
+t = await ask1("no lookup", answer("Incident #456 - High latency on payment-service", { grounded: false,
+  warnings: ["the answer was given without looking anything up: treat it as unchecked"] }));
+if (text(badgeOf(t)).trim() !== "Unverified: treat as unchecked" || !String(badgeOf(t).className).includes("unchecked")) fail("an ungrounded answer must say Unverified: treat as unchecked: " + text(t));
+const strong = findAll(t, (e) => String(e.className) === "warning-strong");
+if (strong.length !== 1 || !text(strong[0]).includes("without looking anything up")) fail("the warning must be shown prominently: " + text(t));
+if (findAll(t, (e) => String(e.className) === "hint" && text(e).includes("without looking anything up")).length) fail("the warning must not be a faint hint");
+if (!String(t.className).includes("is-unverified")) fail("the unverified turn needs its marker class");
+
+t = await ask1("fabricated", answer("Cause [incident #3] and [incident #99: UNVERIFIED, not found].", { sources: src3, grounded: false,
+  unverified: [{ type: "incident", id: 99, ref: "incident #99", reason: "not_found" }, { type: "reference", id: 5, ref: "#5", reason: "ambiguous" }],
+  warnings: ["2 citation(s) could not be verified and are marked UNVERIFIED in the answer"] }));
+if (text(badgeOf(t)).trim() !== "Unverified: treat as unchecked") fail("a verified source next to an unverified one is still Unverified");
+if (!text(t).includes("#5 (could be more than one kind of record)") || !text(t).includes("incident #99 (no such record)")) fail("unverified reasons: " + text(t));
+if (findAll(t, (e) => String(e.className) === "warning-strong").length) fail("the specific unverified note is shown, not a second generic warning box");
+
+t = await ask1("server says grounded but nothing backs it", answer("trust me", { grounded: true }));
+if (text(badgeOf(t)).trim() !== "Unverified: treat as unchecked") fail("grounded:true without any source must not be shown as Verified");
+if (!text(t).includes("cites no verified source")) fail("an ungrounded answer with no warning still needs the loud line: " + text(t));
+
+t = await ask1("corrected", answer("Now backed [incident #3].", { sources: src3, grounded: true, corrected: true }));
+if (text(badgeOf(t)).trim() !== "Verified" || !text(t).includes("asked the model to look things up")) fail("a corrected, now grounded answer: Verified plus the note: " + text(t));
+
+t = await ask1("hostile", answer("x", { grounded: false, warnings: ["<img src=x onerror=alert(1)> warning"] }));
+if (findAll(t, (e) => ["img", "script"].includes(e.tag)).length || !text(t).includes("<img src=x onerror=alert(1)> warning")) fail("a warning must stay text");
+
+console.log("ok: the Ask tab (Verified/Unverified badge, suggestions, typing state, verified chips, flagged citations, textContent only, keyboard, retry, persistence)");
 process.exit(0);

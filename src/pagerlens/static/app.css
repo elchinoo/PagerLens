@@ -114,6 +114,10 @@ td.pick { width: 1.5rem; }
 .sources .chip { display: inline-flex; gap: .3rem; align-items: baseline; text-decoration: none; }
 .sources .chip-ref { font-weight: 700; }
 .unverified { margin: .5rem 0 0; padding: .4rem .6rem; border-radius: 8px; background: var(--warn-bg); color: var(--warn); font-size: .9rem; }
+.badge.verdict { margin: 0 0 .3rem; font-weight: 700; }
+.badge.verdict.verified { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+.badge.verdict.unchecked { background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn); }
+.warning-strong { margin: .5rem 0 0; padding: .5rem .7rem; border-radius: 8px; border: 1px solid var(--warn); background: var(--warn-bg); color: var(--warn); font-weight: 600; }
 .typing { padding: .6rem 0; }
 .ask-form { margin-top: .8rem; }
 .ask-form textarea { min-height: 3.2rem; }

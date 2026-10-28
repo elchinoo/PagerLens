@@ -100,7 +100,9 @@ affected version or commit.
 - **Ask PagerLens** (`POST /api/ask`, the `ask` MCP tool). Same model-safety properties as above, plus: the turn runs on a
   database connection opened READ ONLY; the model is offered nine read-only tools; every citation in its answer is checked
   against the database (the record must exist and have been read through a tool in that conversation) and a failing one is
-  marked `UNVERIFIED`; questions are rate limited per caller and overall; conversations are kept in memory only, scrubbed,
+  marked `UNVERIFIED` (harmless variants such as `[#95]` are accepted only for records that were read; a fabricated
+  id, or a tool name in brackets, never verifies); the first round requires a tool call and an uncited or failing answer
+  gets one corrective round inside the same bounds, after which it is shown as Unverified; questions are rate limited per caller and overall; conversations are kept in memory only, scrubbed,
   bounded and bound to the credential that started them. What a tool returns is sent to the chat provider. Verification
   proves a record exists and was read, not that it supports the claim.
 - **Tuning.** `tuning:manage` (administrators and `full` tokens) guards the proposals, their approval and the apply. Apply

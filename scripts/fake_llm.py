@@ -16,6 +16,8 @@ What it does, so nobody mistakes it for intelligence:
     "Why is checkout-api failing?"    list_incidents -> get_incident -> get_evidence + search_runbooks -> answer
     "Have we seen this before?"       list_incidents -> get_incident -> similar_incidents -> answer
     "What is slow in the database?"   database_health + list_services + list_incidents -> slow_queries per service -> answer
+  It honours `tool_choice: "required"` (a request that requires a tool gets a tool call even for a question it does not know), and
+  `--reject-tool-choice` makes it answer 400 to such requests so the client's retry-without path can be rehearsed.
   Any other question gets one honest line saying the stand-in only knows those three. The wording is a template filled from the
   tool results: it is not reasoning.
 * embeddings: a signed feature-hashing vector (lexical, not semantic), of the requested `dimensions` (default 768).
@@ -37,6 +39,7 @@ import re
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+REJECT_TOOL_CHOICE = False      # --reject-tool-choice: answer 400 to a request carrying tool_choice, like some providers do
 BANNER = "DEMO STAND-IN: deterministic fake model, not an AI"
 TOOLS_FIRST = ("service_overview", "metrics_overview", "error_signatures", "recent_deploys")
 
@@ -81,7 +84,7 @@ def _tool_call(n: int, name: str, args: dict) -> dict:
 def _ask_state(messages: list) -> tuple[str, dict]:
     """The question being answered and what the tools returned for it: {tool name: [payload, ...]} in call order."""
     asking = max((i for i, m in enumerate(messages) if m.get("role") == "user"
-                  and not _text(m.get("content")).startswith("Answer now")), default=-1)
+                  and not _text(m.get("content")).startswith(("Answer now", "Correction:"))), default=-1)
     question = _text(messages[asking].get("content")) if asking >= 0 else ""
     names, got = {}, {}
     for m in messages[asking + 1:]:
@@ -102,12 +105,19 @@ def _pick_incident(listing: dict) -> dict | None:
     return next((r for r in rows if r.get("status") != "resolved"), rows[0] if rows else None)
 
 
+def _known(q: str) -> bool:
+    return bool(("slow" in q and re.search(r"database|quer|sql", q)) or re.search(r"seen (this|it|that)? ?before|happened before|similar", q)
+                or "fail" in q or "why" in q)
+
+
 def ask_reply(body: dict) -> dict:
     question, got = _ask_state(body.get("messages") or [])
     q = question.lower()
     reply = lambda text: {"role": "assistant", "content": text}  # noqa: E731
     calls = lambda *specs: {"role": "assistant", "content": None,  # noqa: E731
                             "tool_calls": [_tool_call(i, n, a) for i, (n, a) in enumerate(specs, 1)]}
+    if body.get("tool_choice") == "required" and not got and not _known(q):
+        return calls(("list_services", {}))            # a required lookup is honoured even when the question is not one it knows
     if "slow" in q and re.search(r"database|quer|sql", q):
         if not got:
             return calls(("database_health", {"limit": 5}), ("list_services", {}), ("list_incidents", {"limit": 10}))
@@ -241,6 +251,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"object": "list", "model": body.get("model", "demo-embed"), "data": data,
                                     "usage": {"prompt_tokens": 1, "total_tokens": 1}})
         if path.endswith("/chat/completions"):
+            if REJECT_TOOL_CHOICE and "tool_choice" in body:
+                return self._send(400, {"error": {"message": "tool_choice is not supported by this model"}})
             msg = chat_reply(body)
             return self._send(200, {"id": "chatcmpl-demo", "object": "chat.completion", "created": int(time.time()),
                                     "model": body.get("model", "demo-chat"),
@@ -253,7 +265,10 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     ap = argparse.ArgumentParser(description=BANNER)
     ap.add_argument("--port", type=int, default=8099)
+    ap.add_argument("--reject-tool-choice", action="store_true", help="answer 400 to requests that carry tool_choice")
     args = ap.parse_args()
+    global REJECT_TOOL_CHOICE
+    REJECT_TOOL_CHOICE = args.reject_tool_choice
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)  # loopback only, on purpose
     print(f"[fake-llm] {BANNER}; listening on http://127.0.0.1:{args.port}/v1")
     try:

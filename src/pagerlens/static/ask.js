@@ -21,10 +21,16 @@ function sourceChip(s) {
   return h("li", {}, ok ? h("a", { class: "chip link", href: s.link, title: `${s.ref}: ${s.label || ""}` }, ...kids) : h("span", { class: "chip" }, ...kids));
 }
 
-const WHY = { not_found: "no such record", not_read: "never read in this conversation" };
+const WHY = { not_found: "no such record", not_read: "never read in this conversation", ambiguous: "could be more than one kind of record" };
+const UNCHECKED = "Unverified: treat as unchecked";
 
 function assistantTurn(t) {
-  const kids = [h("p", { class: "who" }, "PagerLens"), h("p", { class: "text" }, t.text)];
+  // "Verified" means only this: every citation exists and was read through a tool in this conversation, and there is at least one.
+  // Anything else (no sources, a failed citation, no lookup at all) is Unverified, said loudly, and the server's warnings are shown prominently.
+  const verified = t.grounded === true && !!(t.sources && t.sources.length) && !(t.unverified && t.unverified.length);
+  const kids = [h("p", { class: "who" }, "PagerLens"),
+    h("p", { class: `badge verdict ${verified ? "verified" : "unchecked"}` }, verified ? "Verified" : UNCHECKED),
+    h("p", { class: "text" }, t.text)];
   if (t.sources && t.sources.length) {
     kids.push(h("p", { class: "hint", id: `src-${t.n}` }, "Verified sources (checked against the database):"),
       h("ul", { class: "sources", "aria-labelledby": `src-${t.n}` }, ...t.sources.map(sourceChip)));
@@ -35,9 +41,12 @@ function assistantTurn(t) {
       ". They are marked in the answer and are not shown as sources."));
   }
   const others = (t.warnings || []).filter((w) => !/could not be verified/.test(w));
-  for (const w of others) kids.push(h("p", { class: "hint" }, w));
+  if (verified) for (const w of others) kids.push(h("p", { class: "hint" }, w));
+  else if (others.length) for (const w of others) kids.push(h("p", { class: "warning-strong", role: "note" }, w[0].toUpperCase() + w.slice(1)));
+  else if (!(t.unverified && t.unverified.length)) kids.push(h("p", { class: "warning-strong", role: "note" }, "The answer cites no verified source: treat it as unchecked."));
+  if (t.corrected) kids.push(h("p", { class: "hint" }, "The first draft was not backed by sources, so PagerLens asked the model to look things up and cite them once more."));
   if (t.steps && t.steps.length) kids.push(h("p", { class: "hint" }, "Looked at: " + t.steps.filter((s) => !s.error).map((s) => s.tool).join(", ")));
-  return h("article", { class: "msg assistant" }, ...kids);
+  return h("article", { class: `msg assistant ${verified ? "is-verified" : "is-unverified"}` }, ...kids);
 }
 
 function render() {
@@ -79,7 +88,7 @@ async function run() {
     const messages = convo.turns.slice(-6).map((t) => ({ role: t.role, content: turnText(t) }));
     const out = await api("/api/ask", { method: "POST", json: { messages, ...(convo.id ? { conversation_id: convo.id } : {}) } });
     convo.id = out.conversation_id;
-    convo.turns.push({ role: "assistant", text: out.answer, sources: out.sources, unverified: out.unverified, warnings: out.warnings, steps: out.steps });
+    convo.turns.push({ role: "assistant", text: out.answer, sources: out.sources, unverified: out.unverified, warnings: out.warnings, steps: out.steps, grounded: out.grounded, corrected: out.corrected });
   } catch (err) {
     convo.error = err && err.message ? err.message : "Something went wrong. Try again.";
   }
