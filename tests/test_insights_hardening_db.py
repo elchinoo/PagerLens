@@ -105,7 +105,7 @@ def roles():
     """AgentPG's group role, a login member of it, and the default privilege AgentPG sets (SELECT on every new table)."""
     with connect() as c:
         c.execute("CREATE ROLE a1p_readonly NOLOGIN")
-        c.execute(f"CREATE ROLE {LOGIN} LOGIN IN ROLE a1p_readonly")
+        c.execute(f"CREATE ROLE {LOGIN} LOGIN PASSWORD 'ro-pw-test' IN ROLE a1p_readonly")
         c.commit()
     _reset(drop_roles=False)
     with connect() as c:
@@ -118,7 +118,7 @@ def roles():
 
 
 def ro():
-    return psycopg.connect(make_conninfo(os.environ["TEST_DATABASE_URL"], user=LOGIN), row_factory=dict_row, autocommit=True)
+    return psycopg.connect(make_conninfo(os.environ["TEST_DATABASE_URL"], user=LOGIN, password="ro-pw-test"), row_factory=dict_row, autocommit=True)
 
 
 def test_without_the_read_only_role_hardening_skips_quietly(admin):
