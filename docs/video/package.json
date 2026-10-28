@@ -1,0 +1,13 @@
+{
+  "name": "pagerlens-video-recorder",
+  "private": true,
+  "description": "Playwright recorder for the PagerLens tutorial video (docs/VIDEO-SCRIPT.md). Local only.",
+  "scripts": {
+    "record": "playwright test -c playwright.config.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "@types/node": "26.6.5",
+    "typescript": "7.0.2"
+  }
+}

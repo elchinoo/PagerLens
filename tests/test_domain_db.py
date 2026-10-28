@@ -118,6 +118,44 @@ def test_alert_webhook_opens_and_deduplicates_incidents(admin):
         assert c.execute("SELECT count(*) AS n FROM alert").fetchone()["n"] == 3
 
 
+def test_alert_with_investigate_runs_a_rules_investigation_once(admin):
+    with connect_vector() as conn:
+        simulator.trigger(conn, "bad_deploy")           # telemetry for checkout-api; its own incident is already open
+        conn.commit()
+    tok = make_token(admin, "ingest")
+    admin.cookies.clear()
+    alert = {"service": "checkout-api", "name": "ErrorBudgetBurn", "summary": "5xx above 5% after a release", "investigate": True}
+    first = admin.post("/api/ingest/alerts", headers=bearer(tok), json=alert | {"service": "web-frontend"}).json()
+    assert first["new_incident"] and first["investigation"] == "done" and first["run_id"]
+    again = admin.post("/api/ingest/alerts", headers=bearer(tok), json=alert | {"service": "web-frontend"}).json()
+    assert again["incident_id"] == first["incident_id"] and again["investigation"] == "already investigated"
+    plain = admin.post("/api/ingest/alerts", headers=bearer(tok), json=alert | {"service": "inventory-api", "investigate": False}).json()
+    assert "run_id" not in plain and "investigation" not in plain
+    with connect() as c:
+        run = c.execute("SELECT mode, status FROM run WHERE id=%s", (first["run_id"],)).fetchone()
+        assert (run["mode"], run["status"]) == ("rules", "done")
+        assert c.execute("SELECT count(*) AS n FROM hypothesis WHERE run_id=%s", (first["run_id"],)).fetchone()["n"] >= 1
+        assert c.execute("SELECT count(*) AS n FROM run WHERE incident_id=%s", (plain["incident_id"],)).fetchone()["n"] == 0
+    # the ingest token still reads nothing back
+    assert admin.get(f"/api/incidents/{first['incident_id']}", headers=bearer(tok)).status_code == 403
+
+
+def test_alert_investigate_failure_keeps_the_alert(admin, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("tool context exploded")
+
+    monkeypatch.setattr(investigator, "investigate", boom)
+    tok = make_token(admin, "ingest")
+    admin.cookies.clear()
+    r = admin.post("/api/ingest/alerts", headers=bearer(tok),
+                   json={"service": "checkout-api", "name": "HighErrorRate", "investigate": True})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["new_incident"] and body["investigation"] == "failed: RuntimeError" and "run_id" not in body
+    with connect() as c:
+        assert c.execute("SELECT count(*) AS n FROM alert").fetchone()["n"] == 1
+
+
 # ---- investigation ---------------------------------------------------------------------------------
 
 def run_scenario(key, *, memory=False, seed=7):

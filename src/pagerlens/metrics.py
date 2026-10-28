@@ -36,3 +36,14 @@ class DatabaseCollector:
 
 REGISTRY.register(DatabaseCollector())
 
+
+
+# Query statistics of THIS app's database (EDB's edb_stat_monitor, else pg_stat_statements) as a few small gauges, so pagerlens-agent
+# can feed them back as telemetry and a regression becomes a finding (see docs/GUIDE.md, "Watching the fleet's databases").
+# Cached for 30 s; a scrape never fails: no statistics means db_insights_available 0.
+def _connect():
+    from .db import connect
+    return connect(retries=1)
+
+
+_kit.add_insights_collector(_connect, top=5, min_calls=5, ttl=30)

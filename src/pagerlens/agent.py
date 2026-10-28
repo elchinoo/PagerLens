@@ -29,6 +29,8 @@ from apgkit.auth import TokenError, TokenSource
 from apgkit.config import read_secret
 from prometheus_client.parser import text_string_to_metric_families
 
+from . import slowquery
+
 NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
 ENV = re.compile(r"^[A-Z_][A-Z0-9_]{0,63}$")
 SANDBOX = re.compile(r"^sbx-[a-z0-9]{4,40}$")
@@ -184,6 +186,7 @@ class ScrapeState:
     def __init__(self):
         self.prev: dict | None = None
         self.version: str | None = None
+        self.slow = slowquery.Watch()        # db_insights_top_query_mean_seconds: a sustained rise opens a SlowQuery alert
 
 
 def _hist_p95(prev: dict, cur: dict) -> float | None:
@@ -232,6 +235,14 @@ def run_scrape(client: httpx.Client, target: Target, sc: dict, st: ScrapeState, 
                 cur["cpu"] = s.value
             elif s.name == "app_info":
                 version = s.labels.get("version")
+            elif s.name == slowquery.SOURCE_METRIC:
+                name, ms = slowquery.metric_name(s.labels.get("queryid", "")), s.value * 1000
+                if name and ms == ms and ms >= 0:      # one metric point per statement; the investigator compares it with its baseline
+                    batch.metrics.append({"name": name, "value": ms})
+                    if (hit := st.slow.observe(slowquery.query_id(name), ms)):
+                        batch.alerts.append({"service": target.name, "name": "SlowQuery", "severity": "sev3", "source": "pagerlens-agent",
+                                             "summary": f"{target.name}: query {slowquery.short_id(hit['queryid'])} mean time rose from {hit['before_ms']:.0f} ms "
+                                                        f"to {hit['after_ms']:.0f} ms and stayed there"})
     prev = st.prev
     if prev and now > prev["t"]:
         dt, dtotal, derr = now - prev["t"], cur["total"] - prev["total"], cur["errors"] - prev["errors"]

@@ -1,7 +1,8 @@
 import { api } from "/kit/api.js";
 import { initConnect } from "/static/connect.js";
 import { initDashboard, stopDashboard } from "/static/dashboard.js";
-import { initIncidents } from "/static/incidents.js";
+import { initDatabase } from "/static/dbinsights.js";
+import { initIncidents, stopIncidents } from "/static/incidents.js";
 import { initLab } from "/static/lab.js";
 import { initRunbooks } from "/static/runbooks.js";
 import { initService, stopService } from "/static/service.js";
@@ -9,8 +10,8 @@ import { initSettings } from "/static/settings.js";
 import { bootSession, can, refreshSession, renderLogin, renderSetup, renderVaultBanner, state } from "/kit/session.js";
 import { $, h } from "/kit/ui.js";
 
-const TABS = ["dashboard", "service", "incidents", "runbooks", "lab", "settings", "connect"];
-const INIT = { dashboard: initDashboard, service: initService, incidents: initIncidents, lab: initLab, runbooks: initRunbooks, settings: initSettings, connect: initConnect };
+const TABS = ["dashboard", "service", "incidents", "runbooks", "lab", "insights", "settings", "connect"];
+const INIT = { dashboard: initDashboard, service: initService, incidents: initIncidents, lab: initLab, runbooks: initRunbooks, insights: initDatabase, settings: initSettings, connect: initConnect };
 const SECTIONS = ["auth-card", "vault-banner", "nav", "signout", ...TABS.map((t) => "view-" + t)];
 
 function hideAll() { for (const id of SECTIONS) $(id).hidden = true; }
@@ -32,7 +33,7 @@ async function boot(notice = "") {
 }
 
 // What each tab needs; the server enforces it, this only hides what a role would be refused.
-const NEEDS = { dashboard: "dashboard:read", service: "dashboard:read", incidents: "incidents:read", runbooks: "runbooks:read", lab: "simulator:run", settings: "settings:manage", connect: "mcp:use" };
+const NEEDS = { dashboard: "dashboard:read", service: "dashboard:read", incidents: "incidents:read", runbooks: "runbooks:read", lab: "simulator:run", insights: "settings:manage", settings: "settings:manage", connect: "mcp:use" };
 
 function showApp() {
   $("auth-card").hidden = true;
@@ -51,6 +52,7 @@ function route() {
   const tab = allowed.includes(name) ? name : (allowed[0] || "dashboard");
   if (tab !== "dashboard") stopDashboard();
   if (tab !== "service") stopService();
+  if (tab !== "incidents") stopIncidents();
   for (const t of TABS) $("view-" + t).hidden = t !== tab;
   const navTab = tab === "service" ? "dashboard" : tab;           // a service page belongs to the Dashboard tab
   for (const a of document.querySelectorAll("#nav a")) a.classList.toggle("active", a.dataset.tab === navTab);

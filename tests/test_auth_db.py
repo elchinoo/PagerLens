@@ -34,7 +34,8 @@ def _db(monkeypatch, client):
 # ---- vault ------------------------------------------------------------------------------------
 def test_vault_lifecycle():
     with connect() as c:
-        assert vault.status(c) == {"initialized": False, "unlocked": False, "auto_unlock": False}
+        st = vault.status(c)
+        assert {k: st[k] for k in ("initialized", "unlocked", "auto_unlock")} == {"initialized": False, "unlocked": False, "auto_unlock": False}
         vault.initialize(c, PASSWORD)
         c.commit()
         token = vault.encrypt("sk-secret-value")
@@ -136,7 +137,7 @@ def test_restart_locks_vault_until_password(client):
     assert client.get("/api/session").json()["vault"]["unlocked"] is True
     vault.lock()  # simulates a process restart: the session cookie survives, the in-memory key does not
     s = client.get("/api/session").json()
-    assert s["state"] == "logged_in" and s["vault"] == {"initialized": True, "unlocked": False, "auto_unlock": False}
+    assert s["state"] == "logged_in" and {k: s["vault"][k] for k in ("initialized", "unlocked", "auto_unlock")} == {"initialized": True, "unlocked": False, "auto_unlock": False}
     assert client.post("/api/vault/unlock", json={"password": "wrong-password-xx"}, headers=H).status_code == 403  # pragma: allowlist secret
     assert client.get("/api/session").json()["state"] == "logged_in"  # a wrong password must not end the session
     assert client.post("/api/vault/unlock", json={"password": PASSWORD}, headers=H).status_code == 200

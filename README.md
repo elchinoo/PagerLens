@@ -6,6 +6,8 @@ An **incident-investigation agent** on **Postgres + pgvector**, with a web app, 
 
 It ships with a **self-contained demo**: a fictional five-service online shop that breaks on demand, so everyone can try it without connecting anything. The same ingest API accepts your own logs, metrics, deploys and alerts.
 
+**Documentation:** the complete [PagerLens guide](docs/GUIDE.md) (ecosystem integration, architecture, install, configuration, operations) and the [tutorial video script](docs/VIDEO-SCRIPT.md).
+
 > [!WARNING]
 > **Hosted sandboxes can pause themselves and then answer `503`.**
 > If you deploy PagerLens on a platform whose free tier auto-pauses idle workloads (AgentPG sandboxes do), the app stops after a period of inactivity and the platform returns an empty **HTTP 503** for every URL until you resume it. Your data is safe (it lives in the database), but the app is unreachable.
@@ -17,12 +19,13 @@ It ships with a **self-contained demo**: a fictional five-service online shop th
 
 ## What you get
 
-- **Lab:** nine scripted failures (bad release, database pool exhaustion, memory leak, dependency outage, traffic spike, expired certificate, and three deliberately confusing mixes). The simulator writes realistic telemetry through the same ingest path real services use, fires the alert, and keeps the true cause hidden.
+- **Lab:** ten scripted failures (bad release, database pool exhaustion, memory leak, dependency outage, traffic spike, expired certificate, a slow-query regression, and three deliberately confusing mixes). The simulator writes realistic telemetry through the same ingest path real services use, fires the alert, and keeps the true cause hidden.
 - **Investigation:** a bounded, read-only run that records every step. Each hypothesis cites observations that *support* or *refute* it, and you can open the raw data behind any claim. Red herrings (an unrelated deploy, a downstream victim) are checked and called out.
 - **Three methods:** *Rules* (deterministic, free), *AI* (a model drives the same read-only tools) and *Rules + AI* (both, reconciled: agreement is rewarded, disagreement is shown, and anything the model says is checked against real evidence before it counts).
 - **Collection:** push API, OpenTelemetry (OTLP/HTTP) and a pull agent with health probes and Prometheus scraping. See [How data gets in](#how-data-gets-in).
 - **Memory:** mark the real cause and the incident is embedded in pgvector. Similar future incidents recall it as a prior. `pagerlens eval` measures a cold run against a warm one with the hidden answers.
 - **Runbooks:** retrieved with hybrid vector + full-text search (reciprocal rank fusion) and attached to the report as *manual* next steps.
+- **EDB and AgentPG features:** live incident pages through Postgres `tcn` notifications, a Database tab with EDB's query insights (`edb_stat_monitor`, `edb_pg_tuner`, `query_advisor`), a `slow_query` finding fed by the other apps' `db_insights_*` metrics, and database-enforced masking for read-only and AI access (`a1p_readonly` plus masked views). See [EDB and AgentPG capabilities used by this app](docs/GUIDE.md#edb-and-agentpg-capabilities-used-by-this-app).
 - **MCP server** at `/mcp` for Claude Code, VS Code, Codex, Cursor and more: ask "why is checkout failing?" from your editor.
 - **Safe by default:** first-run setup code, hashed tokens with separate `read`, `ingest`, `metrics` and `full` scopes, optional single sign-on with roles, encrypted provider keys, PII scrubbing of every log line before it is stored, a strict CSP and a non-root container. See [SECURITY.md](SECURITY.md).
 
@@ -53,7 +56,7 @@ Or run everything in containers: `docker compose up` serves the app on http://lo
 
 1. **Triage:** an alert opens an incident, or joins an open one with the same fingerprint or a near-identical symptom (pgvector similarity).
 2. **Evidence:** for the alerting service and everything it depends on: metrics compared to a baseline, grouped error signatures with first-seen times, and deploys shortly before the first anomaly. Every tool call is a capped `SELECT`, logged as a run step, and stored as an observation with a digest.
-3. **Hypotheses:** twelve failure patterns are scored from the evidence (bad deploy, database saturation, resource exhaustion, dependency outage, traffic spike, expired certificate, service down, sandbox paused, database unreachable, and for sensor fleets and collection pipelines such as [CityPulse](https://github.com/elchinoo/CityPulse): ingest overload, sensor-fleet outage, bad sensor data). Shares like `offline_pct` or `overloaded_pct` are judged on their own, since 40% of sensors offline needs no baseline to be alarming. For on/off health signals only the most recent samples count, so a fresh outage is not averaged away, and a newly monitored service with no history can still be diagnosed. A dependency that is itself failing is blamed rather than the alerting service. A deploy is only blamed if the new error appeared *after* it.
+3. **Hypotheses:** thirteen failure patterns are scored from the evidence (bad deploy, database saturation, resource exhaustion, dependency outage, traffic spike, expired certificate, service down, sandbox paused, database unreachable, slow query, and for sensor fleets and collection pipelines such as [CityPulse](https://github.com/elchinoo/CityPulse): ingest overload, sensor-fleet outage, bad sensor data). Shares like `offline_pct` or `overloaded_pct` are judged on their own, since 40% of sensors offline needs no baseline to be alarming. For on/off health signals only the most recent samples count, so a fresh outage is not averaged away, and a newly monitored service with no history can still be diagnosed. A dependency that is itself failing is blamed rather than the alerting service. A deploy is only blamed if the new error appeared *after* it.
 4. **Refuting checks:** unrelated deploys, load that explains memory growth, and similar contradictions subtract from a hypothesis and are shown as such.
 5. **Memory prior:** similar resolved incidents add a small, visible boost to the category they were resolved as.
 6. **Report:** Markdown with timeline, ranked hypotheses, similar past incidents and runbook steps, ready to paste into Slack or an issue.
@@ -91,7 +94,7 @@ Choose the provider with care: **log excerpts leave your server** for the AI and
 
 ### What the evaluation does and does not show
 
-`pagerlens eval` replays all nine scenarios cold (no memory), teaches the memory the true causes, then replays them with different noise and reports top-1 and top-3 accuracy. For the **rules** method on a clean database it currently reports top-3 of 100% in both passes, and one scenario (a release that introduces a memory leak) misses at rank 1 until memory has seen a similar case.
+`pagerlens eval` replays all ten scenarios cold (no memory), teaches the memory the true causes, then replays them with different noise and reports top-1 and top-3 accuracy. For the **rules** method on a clean database it currently reports top-3 of 100% in both passes, and one scenario (a release that introduces a memory leak) misses at rank 1 until memory has seen a similar case.
 
 `pagerlens eval --mode hybrid --account env` (or `llm`) runs the same comparison with a model and prints the tokens used. It makes 18 investigations against your provider and spends credit, and **I have not run it against a live model**, so there are no AI accuracy numbers to quote yet. Use `env` for the CLI (set `LLM_BASE_URL`, `LLM_API_KEY` and `LLM_CHAT_MODEL`): accounts stored in the web app are locked outside the browser.
 
@@ -127,6 +130,7 @@ curl -X POST https://<your-host>/api/ingest/services -H "Authorization: Bearer $
 - Up to 1000 events or points per request; timestamps may be up to 14 days old and 5 minutes ahead; bodies are capped at 2 MB.
 - Every log line is **scrubbed before it is stored**: emails, IPv4/IPv6 addresses, card numbers, SSNs, phone numbers, bearer tokens, JWTs, API-key shapes and `password=`/`token=` values. Scrubbing is best effort and pattern based; do not rely on it as a licence to log secrets.
 - Webhooks from Grafana, Alertmanager or similar tools can post to `/api/ingest/alerts` through a small relay; there is no provider-specific parser yet.
+- `"investigate": true` in an alert body also runs a Rules investigation (no model, no cost) for a not-yet-investigated incident and returns its `run_id`; a failure there never loses the alert. The AI methods cannot be started from a webhook.
 
 ## How data gets in
 
@@ -506,7 +510,7 @@ Notes:
 - `pagerlens reembed` does the same on demand and re-embeds everything even if the size is unchanged (a new model with the same size); it probes the provider first and changes nothing if it fails. Admins also have `GET /api/embeddings/status` (configured vs stored size, rows without a vector, `needs_reembedding`, job progress) and `POST /api/embeddings/reembed`. There is no UI for this yet.
 - The model and size the vectors were made with are recorded in the `embedding_index` setting.
 
-Retrieval embeddings are configured from the environment only in this version; the Settings page manages the chat provider accounts used by the AI methods. The same variables (`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_CHAT_MODEL`) also define the `env` account.
+Retrieval embeds with the environment provider by default. An administrator can instead choose a saved provider account (Settings > **Use for embeddings**, or `PUT /api/embeddings/active`); its embedding model and size are then used for runbook search, incident memory and alert de-duplication, and a different size than the stored vectors needs a re-embed (`POST /api/embeddings/reembed`). The same variables (`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_CHAT_MODEL`) also define the `env` account.
 
 ## Container image
 

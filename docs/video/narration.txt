@@ -1,0 +1,207 @@
+## 1 af_bella
+When an alert wakes you up, the hard part is not the alert.
+
+It is finding out why.
+
+This is PagerLens. It looks at what changed, and what broke. It ranks the possible causes, and shows the evidence for each one.
+
+...
+
+It never changes your systems. It only reads.
+
+It runs on plain Postgres, with the pgvector extension. So there is no extra database to run.
+
+## 2 af_bella
+This is a fictional online shop, with five services.
+
+Each card shows whether a service is healthy, its recent metrics, and what it depends on.
+
+Look at checkout-api. It depends on payments-gateway and inventory-api.
+
+That map matters later. It helps PagerLens tell a victim from a cause.
+
+Everything here arrived through the same ingest interface that your own services would use.
+
+The page refreshes every ten seconds.
+
+## 3 am_michael
+Now let's break something.
+
+This is the Lab, a simulator. It can break the shop in ten ways.
+
+A bad release. An exhausted database pool. A memory leak. And some deliberately confusing mixes.
+
+The simulator writes realistic logs, metrics and deploys, and fires an alert.
+
+It also keeps the true cause hidden, so we can check our answer later.
+
+I will pick the bad release.
+
+It replaces the demo data, and keeps past incidents.
+
+Here is the new incident.
+
+## 4 am_michael
+The alert says the checkout error rate is above five percent.
+
+I will investigate it with the Rules method.
+
+Rules means no model, and no cost. It is a fixed investigator, and you can read its logic.
+
+Let's run it.
+
+[pause 1.5]
+
+That took seconds.
+
+It asked read-only questions about checkout, and everything it depends on.
+
+Metrics, compared to a baseline. Grouped error messages. And recent deploys.
+
+Every query is capped, and every step is recorded.
+
+The result is a ranked list of hypotheses, each with a score.
+
+## 5 af_heart
+Let's see why PagerLens trusts its top answer.
+
+The top hypothesis is a release, deployed just before the errors began.
+
+But it is not just a claim.
+
+Every line says whether an observation supports it, or refutes it.
+
+Open an evidence link, and you see the raw data behind it.
+
+Here, a new error signature first appeared after the deploy, not before.
+
+The log text is untrusted. PagerLens shows it, and never obeys it.
+
+It also checks the opposite. An unrelated deploy, or heavy load, subtracts from a hypothesis.
+
+## 6 af_heart
+Next, the report.
+
+It is Markdown, ready to paste into Slack or a ticket.
+
+It holds the most likely cause, and a timeline.
+
+Copy it with one click.
+
+Below it, the run viewer lists every step the investigator took, in order.
+
+The runbook steps are suggestions for a person.
+
+PagerLens has no tool that restarts, rolls back, or edits anything.
+
+## 7 am_eric
+PagerLens has two more investigation methods, and both use a language model.
+
+The first is AI. A model drives the same read-only tools.
+
+The second is Rules plus AI. It runs both, and reconciles them.
+
+When they agree, confidence goes up.
+
+When only the model believes something, its confidence is capped.
+
+And anything the model claims is checked against real evidence.
+
+The model has no tool that changes anything.
+
+To use a model, you add a provider account in settings.
+
+Keys are stored encrypted, and never shown again.
+
+One warning. Log excerpts do leave your server for these methods. So choose your provider with care.
+
+We have not measured accuracy on live models yet.
+
+## 8 am_eric
+Now the same incident, investigated with Rules plus AI.
+
+I choose an account.
+
+This one is a stand-in model that ships with the repository. So no provider key is needed.
+
+It is not a real model. With a real one, the screens read the same. Only the wording and reasoning differ.
+
+I press Investigate. The model will ask for the same read-only tools, one after another.
+
+[pause 3.0]
+
+Done. Each of the model's turns shows up in the run viewer, between the tool calls.
+
+Then the two results are reconciled.
+
+The rules and the model both blame the release. So confidence goes up.
+
+And the evidence the model cites is checked against what really exists.
+
+## 9 af_sarah
+Now the part that makes PagerLens improve over time.
+
+I tell it the real cause, a bad deploy, and add a short note.
+
+The incident is stored as a vector in Postgres, together with its error signatures.
+
+The simulator can reveal its hidden answer. It confirms we were right.
+
+Now I break the same thing again, and investigate.
+
+[pause 6.0]
+
+The new report lists the earlier incident, and the cause it was confirmed as.
+
+Memory only comes from causes a person confirms. Nothing is learned from guesses.
+
+## 10 af_sarah
+Your own services can connect the same way.
+
+Create an ingest token in settings. It can push data, and read nothing.
+
+Then post logs, metrics, deploys and alerts.
+
+OpenTelemetry works too. A small pull agent can probe health endpoints, and scrape Prometheus metrics.
+
+Every log line is scrubbed of emails, addresses and secrets before it is stored.
+
+Here is one alert, posted with curl.
+
+[pause 4.0]
+
+The reply says a new incident was opened.
+
+And there it is, in the incident list.
+
+## 11 af_sarah
+You can also ask from your editor.
+
+PagerLens speaks MCP, a standard way for assistants to call tools.
+
+Claude Code, VS Code and Cursor can all connect.
+
+Here are real calls, made with a read-only token.
+
+It can list incidents, and read the evidence.
+
+But a read-only token can look, and never write.
+
+In the wider ecosystem, CityPulse reports to PagerLens automatically.
+
+People sign in through a shared identity provider.
+
+## 12 af_sarah
+To recap.
+
+PagerLens collects telemetry in Postgres. It ranks causes, with evidence you can open.
+
+It keeps humans in charge, and it learns from the causes you confirm.
+
+To try it, clone the repository, and start the database with docker compose.
+
+Then run migrate, seed and serve, and press Break it in the Lab.
+
+The guide covers installation, configuration and operations.
+
+Thanks for watching.

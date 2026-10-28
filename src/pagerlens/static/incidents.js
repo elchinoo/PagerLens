@@ -2,6 +2,7 @@ import { api } from "/kit/api.js";
 import { LABELS, lineChart } from "/static/charts.js";
 import { renderMarkdown } from "/static/markdown.js";
 import { can } from "/kit/session.js";
+import { watch } from "/static/live.js";
 import { flush } from "/static/regions.js";
 import { $, field, fill, h, scrollRegion, setBusy, toast } from "/kit/ui.js";
 
@@ -9,16 +10,31 @@ const CATEGORY_NAMES = {
   bad_deploy: "Bad deploy", db_saturation: "Database saturation", resource_exhaustion: "Resource exhaustion",
   dependency_outage: "Dependency outage", traffic_spike: "Traffic spike", expired_certificate: "Expired certificate",
   service_down: "Service down", sandbox_paused: "Sandbox paused", database_unreachable: "Database unreachable",
-  ingest_overload: "Ingest overload", sensor_fleet_outage: "Sensor fleet outage", data_quality: "Bad sensor data",
+  ingest_overload: "Ingest overload", sensor_fleet_outage: "Sensor fleet outage", data_quality: "Bad sensor data", slow_query: "Slow query",
 };
 const when = (s) => (s ? new Date(s).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "");
 const SOURCE_NAMES = { rules: "rules", llm: "AI", both: "rules + AI" };
 const sevClass = (s) => `badge sev ${s}`;
 
 let pendingAccount = null;
+let watcher = null;
+let investigating = false;     // an investigation request is in flight: its own reload comes when it ends, so live events wait
+
+export function stopIncidents() { if (watcher) watcher.stop(); watcher = null; }
+
+// Live: the server tells us (tcn -> server-sent events) when an incident or alert changed; we then re-read what is on screen. Without
+// events the same call runs on a timer. A soft reload keeps what is being typed (see grabDrafts).
+function startWatching(box, id) {
+  stopIncidents();
+  watcher = watch(() => {
+    if (investigating || !location.hash.startsWith("#incidents")) return;
+    if (id) renderDetail(box, id, true); else if (list.shell) loadList();
+  });
+}
 
 export async function initIncidents(id) {
   const box = $("view-incidents");
+  startWatching(box, id);
   if (id) return renderDetail(box, id);
   return renderList(box);
 }
@@ -107,7 +123,7 @@ async function loadList() {
     : r.status === "resolved" && r.root_cause_note ? `Resolved: ${r.root_cause_note}` : (r.top_hypothesis || h("span", { class: "muted" }, "not investigated")));
   fill(results,
     rows.length ? flush("Incidents", h("table", {},
-      h("thead", {}, h("tr", {}, ...["", "", "Incident", "Service", "Status", "Likely cause", "Detected"].map((t) => h("th", {}, t)))),
+      h("thead", {}, h("tr", {}, ...[["", "Select"], ["", "Severity"], ["Incident"], ["Service"], ["Status"], ["Likely cause"], ["Detected"]].map(([t, name]) => h("th", {}, name ? h("span", { class: "sr" }, name) : t)))),
       h("tbody", {}, ...rows.map((r) => h("tr", { class: "clickable", tabindex: "0", onclick: () => { location.hash = `#incidents/${r.id}`; },
         onkeydown: (e) => { if (e.key === "Enter") location.hash = `#incidents/${r.id}`; } },
         h("td", { class: "pick", onclick: (e) => e.stopPropagation() }, r.status === "resolved" ? null : h("input", { type: "checkbox", "aria-label": `Select incident ${r.id}`, checked: list.picked.has(r.id),
@@ -160,12 +176,14 @@ async function renderDetail(box, id, soft = false) {
   const go = h("button", { class: "primary", type: "button", onclick: async () => {
     if (mode.value !== "rules" && !acct.value) { toast("Choose an AI account first (Settings > Add account).", true); return; }
     setBusy(go, true, mode.value === "rules" ? "Investigating…" : "Investigating (the AI takes 10-60 s)…");
+    investigating = true;
     try {
       const r = await api(`/api/incidents/${id}/investigate`, { method: "POST", json: { mode: mode.value, use_memory: memory.checked, account: mode.value === "rules" ? null : acct.value } });
       const warn = r.runs[0] && r.runs[0].warning;
       toast(warn ? `Finished with a warning: ${warn}` : "Investigation finished", Boolean(warn));
+      investigating = false;
       reload();
-    } catch (err) { toast(err.message, true); setBusy(go, false); }
+    } catch (err) { investigating = false; toast(err.message, true); setBusy(go, false); }
   } }, inc.runs.length ? "Investigate again" : "Investigate");
 
   const header = h("div", { class: "detail-head" },

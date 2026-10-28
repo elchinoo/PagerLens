@@ -68,6 +68,7 @@ async function renderAccounts() {
 function renderAll() { initSettings(); }
 
 function accountCard(a, data, reload, edit) {
+  const active = data.active_embedding === a.id || (data.active_embedding === "env" && a.id === "env");
   const result = h("p", { class: "test-result", role: "status" });
   const test = (target) => async (e) => {
     e.target.disabled = true;
@@ -76,19 +77,31 @@ function accountCard(a, data, reload, edit) {
     try {
       const r = await api(`/api/accounts/${a.id}/test`, { method: "POST", json: { target } });
       result.className = "test-result ok";
-      result.textContent = `Chat works (${r.ms} ms). Reply: "${r.reply}"`;
+      result.textContent = target === "chat" ? `Chat works (${r.ms} ms). Reply: "${r.reply}"`
+        : `Embeddings work (${r.ms} ms): ${r.dimensions} dimensions from ${r.model}.`;
     } catch (err) { result.className = "test-result bad"; result.textContent = err.message; } finally { e.target.disabled = false; }
   };
   return h("article", { class: "card acct" },
     h("div", { class: "row" }, h("h3", {}, a.name),
       h("span", { class: "badges" },
+        active ? h("span", { class: "badge plain" }, "embeddings") : null,
         a.read_only ? h("span", { class: "badge plain" }, "server setting") : h("span", { class: "badge plain" }, a.provider))),
     h("dl", { class: "facts" },
       h("dt", {}, "Base URL"), h("dd", {}, a.base_url),
       h("dt", {}, "API key"), h("dd", {}, a.has_key ? (a.api_key_last4 ? `stored, ends in ${a.api_key_last4}` : "set by the server") : "none"),
-      h("dt", {}, "Chat model"), h("dd", {}, a.chat_model || "not set")),
+      h("dt", {}, "Chat model"), h("dd", {}, a.chat_model || "not set"),
+      h("dt", {}, "Embedding model"), h("dd", {}, a.embedding_model ? `${a.embedding_model} (${a.embedding_dim} dimensions)${active ? ", used by search and memory" : ""}` : "not set")),
     h("div", { class: "btns wrap" },
       a.chat_model ? h("button", { class: "secondary small", type: "button", onclick: test("chat") }, "Test chat") : null,
+      a.embedding_model ? h("button", { class: "secondary small", type: "button", onclick: test("embeddings") }, "Test embeddings") : null,
+      a.embedding_model && !active ? h("button", { class: "secondary small", type: "button", onclick: async (e) => {
+        e.target.disabled = true;
+        try {
+          const r = await api("/api/embeddings/active", { method: "PUT", json: { account: String(a.id) } });
+          toast(r.needs_reembedding ? "Embeddings switched. Re-embed (pagerlens reembed or POST /api/embeddings/reembed) to use the new size." : "Embeddings switched");
+          reload();
+        } catch (err) { result.className = "test-result bad"; result.textContent = err.message; e.target.disabled = false; }
+      } }, "Use for embeddings") : null,
       a.read_only ? null : h("button", { class: "secondary small", type: "button", onclick: () => edit(a) }, "Edit"),
       a.read_only ? null : h("button", { class: "danger small", type: "button", onclick: async () => {
         if (!(await confirmDialog(`Delete the account "${a.name}"? Its stored key is erased.`, { title: "Delete account", confirmLabel: "Delete", danger: true }))) return;
@@ -105,6 +118,8 @@ function accountForm(existing, presets, saved, cancel) {
   const base = h("input", { id: "af-base", value: e?.base_url || "", maxlength: "300", required: true, placeholder: "https://api.example.com/v1" });
   const key = h("input", { id: "af-key", type: "password", autocomplete: "off", spellcheck: "false", placeholder: e?.has_key ? "leave blank to keep the stored key" : "sk-…" });
   const chat = h("input", { id: "af-chat", value: e?.chat_model || "", maxlength: "120", placeholder: "model name, e.g. from the provider's docs" });
+  const embed = h("input", { id: "af-embed", value: e?.embedding_model || "", maxlength: "120", placeholder: "optional, e.g. text-embedding-3-small" });
+  const dim = h("input", { id: "af-dim", type: "number", min: "8", max: "2000", step: "1", value: e?.embedding_dim ? String(e.embedding_dim) : "", placeholder: "e.g. 768" });
   const clear = h("input", { id: "af-clear", type: "checkbox" });
   const note = h("p", { class: "hint" });
   const err = h("p", { class: "error", role: "alert" });
@@ -114,6 +129,8 @@ function accountForm(existing, presets, saved, cancel) {
     if (e || !p) return;
     base.value = p.base_url;
     chat.value = p.chat_model;
+    embed.value = p.embedding_model || "";
+    dim.value = p.embedding_dim ? String(p.embedding_dim) : "";
     if (!name.value) name.value = p.id === "custom" ? "" : p.name;
   };
   provider.addEventListener("change", applyPreset);
@@ -124,7 +141,7 @@ function accountForm(existing, presets, saved, cancel) {
       ev.preventDefault();
       err.textContent = "";
       const json = { name: name.value, provider: provider.value, base_url: base.value, api_key: key.value || null, clear_key: clear.checked,
-        chat_model: chat.value || null };
+        chat_model: chat.value || null, embedding_model: embed.value || null, embedding_dim: embed.value && dim.value ? Number(dim.value) : null };
       try {
         await api(e ? `/api/accounts/${e.id}` : "/api/accounts", { method: e ? "PUT" : "POST", json });
         key.value = "";
@@ -139,6 +156,8 @@ function accountForm(existing, presets, saved, cancel) {
   field("API key", key, "Stored encrypted. It is never shown again, only its last 4 characters."),
   e?.has_key ? h("label", { class: "check", for: "af-clear" }, clear, " Remove the stored key") : null,
   field("Chat model", chat),
+  h("div", { class: "grid2" }, field("Embedding model", embed, "Used for runbook search and incident memory once you press \"Use for embeddings\" on the saved account."),
+    field("Embedding size", dim, "Must match the stored vectors, or run a re-embed after switching (the vector size follows the active account).")),
   h("div", { class: "btns" }, h("button", { class: "primary", type: "submit" }, e ? "Save changes" : "Add account"),
     h("button", { class: "secondary", type: "button", onclick: cancel }, "Cancel")),
   err);
@@ -171,7 +190,7 @@ async function renderSecurity() {
   async function renderTokenTable() {
     const list = await api("/api/tokens");
     table.replaceChildren(list.length ? flush("API tokens", h("table", {},
-      h("thead", {}, h("tr", {}, ...["Name", "Token", "Access", "Created", "Last used", ""].map((t) => h("th", {}, t)))),
+      h("thead", {}, h("tr", {}, ...[["Name"], ["Token"], ["Access"], ["Created"], ["Last used"], ["", "Actions"]].map(([t, name]) => h("th", {}, name ? h("span", { class: "sr" }, name) : t)))),
       h("tbody", {}, ...list.map((t) => h("tr", {},
         h("td", { class: "title" }, t.name), h("td", {}, h("code", {}, `${t.prefix}…`)), h("td", {}, t.scope),
         h("td", {}, fmtDate(t.created_at)), h("td", {}, fmtDate(t.last_used_at)),

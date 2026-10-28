@@ -1,6 +1,6 @@
 """The investigation loop: rules, LLM or both, always bounded, read-only, evidence-linked and fully recorded.
 
-rules : collect evidence with the read-only tools -> score six failure patterns, each tied to observations that
+rules : collect evidence with the read-only tools -> score thirteen failure categories, each tied to observations that
         support or refute it -> refuting checks -> memory prior from similar resolved incidents.
 llm   : a model drives the same read-only tools in a bounded loop; its answer is validated before it is used.
 hybrid: rules first, then the model investigates the same incident (and may cite the rules' observations); the two
@@ -59,7 +59,8 @@ def _state_note(what: str, m: dict) -> str:
     return f"{what} {m['baseline_mean']:.0%} of the time before, but only {m['current_mean']:.0%} now"
 
 
-def _hypotheses(S: str, targets: list[str], M: dict, SIG: dict, DEP: dict, onset: datetime | None) -> list[Hyp]:
+def _hypotheses(S: str, targets: list[str], M: dict, SIG: dict, DEP: dict, onset: datetime | None,
+                SQ: dict | None = None) -> list[Hyp]:
     out: list[Hyp] = []
 
     def metric(svc, name):
@@ -105,6 +106,28 @@ def _hypotheses(S: str, targets: list[str], M: dict, SIG: dict, DEP: dict, onset
             if lat and lat["z"] >= 4:
                 h.support(m_obs, 0.1, f"p95 latency rose from {lat['baseline_mean']:.0f} to {lat['current_mean']:.0f} ms")
             out.append(h)
+
+    # --- slow query: a statement in the service's own database got much slower and stayed that way ----------------------
+    for svc in targets:
+        found = ((SQ or {}).get(svc) or ({}, 0))[0].get("queries", [])
+        if not found:
+            continue
+        top, q_obs = found[0], SQ[svc][1]
+        h = Hyp("slow_query", svc, f"A SQL statement in {svc}'s database became {top['ratio']:g} times slower")
+        for f in found[:3]:
+            h.support(q_obs, 0.5 if f is top else 0.1, f"query {f['queryid']} on {svc}: mean {f['baseline_ms']:g} ms before, {f['current_ms']:g} ms now "
+                                                      f"(x{f['ratio']:g}); see the statement under Database insights (queryid {f['queryid']})")
+        lat = metric(svc, "latency_p95_ms")
+        if lat and lat["z"] >= 4:
+            h.support(M[svc][1], 0.15, f"p95 latency rose from {lat['baseline_mean']:.0f} to {lat['current_mean']:.0f} ms at the same time")
+        db = metric(svc, "db_connections")
+        if db and db.get("pool_max") and db["current_mean"] / db["pool_max"] >= 0.85:
+            h.refute(M[svc][1], 0.2, f"the connection pool is also nearly full ({db['current_mean']:.0f}/{db['pool_max']:.0f}): "
+                                     "saturation may be the cause and the slow statement a symptom")
+        if DEP[svc][0]["deploys"] and onset and any(
+                timedelta(minutes=-3) <= onset - _dt(d["deployed_at"]) <= timedelta(minutes=15) for d in DEP[svc][0]["deploys"]):
+            h.refute(DEP[svc][1], 0.1, "a deploy happened right before the onset: the release may have changed the query")
+        out.append(h)
 
     # --- resource exhaustion (memory) --------------------------------------------------------------------------------
     for svc in targets:
@@ -281,7 +304,7 @@ def _rules_phase(ctx: Ctx, rec: Recorder, budget: Budget, use_memory: bool) -> R
     S = ctx.service
     overview, _ = call_tool(ctx, rec, budget, "service_overview", service=S)
     targets = [S] + overview.data["depends_on"]
-    M, SIG, DEP = {}, {}, {}
+    M, SIG, DEP, SQ = {}, {}, {}, {}
     for svc in targets:
         r, o = call_tool(ctx, rec, budget, "metrics_overview", service=svc)
         M[svc] = (r.data, o)
@@ -289,6 +312,9 @@ def _rules_phase(ctx: Ctx, rec: Recorder, budget: Budget, use_memory: bool) -> R
         SIG[svc] = (r.data, o)
         r, o = call_tool(ctx, rec, budget, "recent_deploys", service=svc)
         DEP[svc] = (r.data, o)
+        if budget.calls + 2 < budget.max_calls:      # fleets with many dependencies must not run the budget dry for this optional signal
+            r, o = call_tool(ctx, rec, budget, "slow_queries", service=svc)
+            SQ[svc] = (r.data, o)
     # refuting check: are other services' deploys the real story? (read-only, bounded)
     unrelated = []
     for other in [r["name"] for r in ctx.conn.execute("SELECT name FROM service ORDER BY name")]:
@@ -299,7 +325,7 @@ def _rules_phase(ctx: Ctx, rec: Recorder, budget: Budget, use_memory: bool) -> R
                       for d in r.data["deploys"]]
     anomalies = sorted(_dt(d["first_anomaly"]) for d, _ in M.values() if d.get("first_anomaly"))
     onset = anomalies[0] if anomalies else None
-    hyps = _hypotheses(S, targets, M, SIG, DEP, onset)
+    hyps = _hypotheses(S, targets, M, SIG, DEP, onset, SQ)
     similar: list[dict] = []
     if use_memory:
         top_sigs = [s["signature"] for svc in targets for s in SIG[svc][0]["signatures"][:2]]

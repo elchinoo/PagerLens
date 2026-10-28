@@ -120,6 +120,8 @@ def _reconcile_embeddings() -> None:
         return
     if r["refused"]:
         print(f"embedding size not applied: {r['refused']}", file=sys.stderr)
+    elif r["skipped"] and r["skipped"].startswith("the embedding account"):
+        print(f"embeddings left as they are: {r['skipped']}", file=sys.stderr)
     elif r["changed"] or any(r["embedded"].values()) or r["deferred"]:
         print(f"embeddings: {r['dimension']} dimensions, re-embedded {r['embedded']}"
               + (" (continuing in the background)" if r["deferred"] else "")
@@ -138,6 +140,10 @@ def _reembed() -> int:
         return 1
     if r["refused"]:
         print(f"reembed refused: {r['refused']}", file=sys.stderr)
+        return 1
+    if r["skipped"]:
+        print(f"reembed skipped: {r['skipped']} (re-embed from the admin API after signing in, or switch embeddings back "
+              "to the environment)", file=sys.stderr)
         return 1
     if r["failed"]:
         print(f"reembed stopped early: {r['failed']} (re-run later; rows without a vector use text search)", file=sys.stderr)

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from pgvector import Vector
 
+from . import hardening, live
 from .config import get_settings
 
 MIGRATIONS = Path(__file__).resolve().parent / "migrations"
@@ -19,10 +20,14 @@ def run() -> list[str]:
 
     from .core import db
 
-    applied = kit_migrate.run(db, MIGRATIONS, extensions=("vector",), replacements={"{{EMBEDDING_DIM}}": str(get_settings().embedding_dim)})
-    with db.connect() as conn:      # after the app's own migrations: it upgrades tables they created (sessions) and adds the OIDC state
+    def auth_schema(conn) -> None:
+        # after the app's own migrations: it upgrades tables they created (sessions) and adds the OIDC state
         conn.execute(AUTH_SQL)
         conn.commit()
+
+    # The hardening hook runs last, on every start: AgentPG re-grants SELECT to the read-only role on each NEW table.
+    applied = kit_migrate.run(db, MIGRATIONS, extensions=("vector",), replacements={"{{EMBEDDING_DIM}}": str(get_settings().embedding_dim)},
+                              after_migrate=[auth_schema, live.install, hardening.apply])
     return applied
 
 
@@ -162,7 +167,7 @@ def reconcile_embedding_dim(conn, cfg=None, *, defer_above: int | None = DEFER_A
     Never raises on provider problems unless `strict`. Returns a summary dict."""
     from . import embedcfg, retrieval
 
-    cfg = cfg or embedcfg.from_env()
+    cfg = cfg or embedcfg.resolve(conn)
     res: dict = {"dimension": cfg.dim, "previous": {}, "changed": False, "refused": None, "deferred": False,
                  "embedded": {t: 0 for t in INDEXES}, "failed": None, "skipped": None}
     dims = {t: column_dim(conn, t) for t in INDEXES}
@@ -170,6 +175,13 @@ def reconcile_embedding_dim(conn, cfg=None, *, defer_above: int | None = DEFER_A
     if None in dims.values():
         res["refused"] = "tables not found; run migrations first"
         return res
+    if cfg.key_enc:   # an activated account: with the vault locked (after a restart) change nothing rather than empty the columns
+        try:
+            cfg.api_key()
+        except Exception as exc:  # noqa: BLE001 - VaultLocked or a broken stored key
+            res["skipped"] = f"the embedding account's key is unavailable ({retrieval.describe(exc)}); nothing was changed"
+            log.warning("%s", res["skipped"])
+            return res
     if any(d != cfg.dim for d in dims.values()):
         if cfg.dim > MAX_HNSW_DIM or cfg.dim < 1:
             res["refused"] = (f"{cfg.dim} dimensions cannot be indexed (pgvector allows 1 to {MAX_HNSW_DIM}); the "
@@ -262,7 +274,7 @@ def embedding_status(conn, cfg=None) -> dict:
     from . import embedcfg
     from . import settings_store as store
 
-    cfg = cfg or embedcfg.from_env()
+    cfg = cfg or embedcfg.resolve(conn)
     cols = {t: column_dim(conn, t) for t in INDEXES}
     missing = _counts(conn, False) if None not in cols.values() else {}
     try:

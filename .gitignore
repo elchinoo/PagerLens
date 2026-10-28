@@ -12,3 +12,5 @@ api_key
 *.key
 *.pem
 agent.yaml
+docs/video/out/
+docs/video/node_modules

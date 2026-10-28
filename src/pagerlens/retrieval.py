@@ -1,8 +1,9 @@
 """Retrieval over pgvector: runbooks (hybrid vector + full-text, reciprocal rank fusion) and resolved incidents.
 
-Embeddings use the environment-configured provider when one is set (LLM_BASE_URL, EMBEDDING_MODEL, EMBEDDING_DIM,
-whose size the vector columns follow: `migrate.reconcile_embedding_dim` converts them at startup when EMBEDDING_DIM
-changes). Otherwise a built-in offline hasher is used: lexical, not semantic, but enough to demo recall without any account.
+Embeddings use the provider account an administrator activated (`PUT /api/embeddings/active`) or, by default, the
+environment-configured provider when one is set (LLM_BASE_URL, EMBEDDING_MODEL, EMBEDDING_DIM, whose size the vector
+columns follow: `migrate.reconcile_embedding_dim` converts them at startup when EMBEDDING_DIM changes, and `pagerlens
+reembed` converts them to an activated account's size). Otherwise a built-in offline hasher is used: lexical, not semantic, but enough to demo recall without any account.
 
 Retrieval never fails because of embeddings: when the provider is down, or its vectors do not fit the column yet (a
 reconciliation is pending), runbook search falls back to full-text only and incident recall returns nothing.
@@ -18,8 +19,10 @@ RRF_K = 60
 log = logging.getLogger("pagerlens.embeddings")
 
 
-def embed_one(text: str) -> Vector:
-    return Vector(embed([text[:4000]], embedcfg.from_env())[0])
+def embed_one(text: str, conn=None) -> Vector:
+    """Embed with the active provider; with `conn` the stored account choice is honoured, without it the environment."""
+    cfg = embedcfg.resolve(conn) if conn is not None else embedcfg.from_env()
+    return Vector(embed([text[:4000]], cfg)[0])
 
 
 def describe(exc: Exception) -> str:
@@ -32,7 +35,7 @@ def query_vector(conn, text: str, table: str) -> Vector | None:
     from .migrate import column_dim
 
     try:
-        vec = embed_one(text)
+        vec = embed_one(text, conn)
     except Exception as exc:  # noqa: BLE001 - EmbeddingError, locked vault, network: all mean 'no vector', never a 500
         log.warning("embedding unavailable (%s); using text search only", describe(exc))
         return None

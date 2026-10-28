@@ -29,6 +29,22 @@ targets:
       name: ServiceDown
       severity: sev2
 
+  # --- Watching a fleet database: query regressions -------------------------------------------------------
+  # Every app built on agentpg-kit with the insights collector (Metrics.add_insights_collector) also exposes, on the same /metrics:
+  #   db_insights_top_query_mean_seconds{app,queryid}   mean time of its slowest SQL statements (edb_stat_monitor, else pg_stat_statements)
+  # The agent needs NO extra configuration for it: the scrape above already picks it up. For each statement it pushes one metric
+  # point named slowq_<queryid> (mean in milliseconds; a negative query id is written slowq_m<digits>) for THIS target, and when a
+  # statement's mean stays at least 3x its earlier median for 3 scrapes in a row it opens a SlowQuery alert (sev3). PagerLens then
+  # investigates it: the `slow_queries` tool compares each slowq_* series with its baseline and the finding "slow_query" names the
+  # query id with its mean before and after. Look the statement up on that app's Database page (Database insights) by queryid.
+  #   Scrape every 30 s or faster: the detector needs 9 scrapes (6 of history, 3 slow) before it can alert.
+  #   Minimal example for an app that exports the gauge:
+  #   - name: shopfront
+  #     depends_on: []
+  #     scrape:
+  #       - url: https://your-shopfront.example/metrics
+  #         token_env: SHOPFRONT_METRICS     # a "metrics" token of that app
+
   # --- the rest of the family: CityPulse (the platform) and CityPulse Simulator (its field side) ---
   - name: citypulse-ingest
     tier: critical

@@ -20,6 +20,7 @@ CATEGORIES = {
     "ingest_overload": "The collection tier is saturated and refusing or delaying data",
     "sensor_fleet_outage": "A group of sensors stopped reporting",
     "data_quality": "Sensors are sending bad data (rejected, out-of-range or frozen readings)",
+    "slow_query": "A SQL statement became much slower (query regression in a service's database)",
     "unknown": "Not enough evidence",
 }
 

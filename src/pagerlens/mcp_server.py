@@ -133,7 +133,7 @@ def add_note(incident_id: int, note: str, ctx: Context) -> dict:
 def mark_root_cause(incident_id: int, category: str, ctx: Context, note: str | None = None) -> dict:
     """Record the confirmed cause and resolve the incident (needs a full-access token or the write permission). The incident then becomes
     memory that improves future investigations. category is one of: bad_deploy, db_saturation, resource_exhaustion,
-    dependency_outage, traffic_spike, expired_certificate, service_down, sandbox_paused, database_unreachable, ingest_overload, sensor_fleet_outage, data_quality."""
+    dependency_outage, traffic_spike, expired_certificate, service_down, sandbox_paused, database_unreachable, ingest_overload, sensor_fleet_outage, data_quality, slow_query."""
     _require(ctx, "incidents:write")
     with connect_vector() as conn:
         incidents.resolve(conn, incident_id, category, note)

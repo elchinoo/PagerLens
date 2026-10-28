@@ -7,7 +7,7 @@ import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from . import retrieval
+from . import retrieval, slowquery
 
 BASE_FROM, BASE_TO = timedelta(minutes=85), timedelta(minutes=35)   # baseline window, before the anchor
 CUR_FROM = timedelta(minutes=10)                                       # "now" window
@@ -154,6 +154,30 @@ def metrics_overview(ctx: Ctx, service: str) -> ToolResult:
                       {"service": service, "metrics": out, "first_anomaly": onsets[0] if onsets else None}, len(out))
 
 
+def slow_queries(ctx: Ctx, service: str) -> ToolResult:
+    """SQL statements of the service's database whose mean time rose and stayed up. The series come from the fleet's
+    `db_insights_top_query_mean_seconds` gauge (pagerlens-agent stores each statement as `slowq_<queryid>`, in milliseconds)."""
+    s = _service(ctx, service)
+    names = [r["name"] for r in ctx.conn.execute(
+        "SELECT DISTINCT name FROM metric_point WHERE service_id=%s AND starts_with(name, %s) AND ts BETWEEN %s AND %s ORDER BY name LIMIT 60",
+        (s["id"], slowquery.PREFIX, ctx.anchor - BASE_FROM, ctx.anchor))]
+    found = []
+    for name in names:
+        c = _compare(ctx, s["id"], name)
+        if not c or not c["ratio"] or c["ratio"] < 3 or c["z"] < 4:
+            continue
+        last = [v for _, v in _series(ctx, s["id"], name, ctx.anchor - CUR_FROM, ctx.anchor)][-3:]
+        if len(last) < 3 or min(last) < 2 * c["baseline_mean"]:
+            continue   # a spike, not a regression that stays
+        found.append({"queryid": slowquery.query_id(name), "baseline_ms": c["baseline_mean"], "current_ms": c["current_mean"],
+                      "ratio": c["ratio"], "z": c["z"], "onset": c["onset"]})
+    found.sort(key=lambda f: f["ratio"], reverse=True)
+    found = found[:5]
+    text = "; ".join(f"query {f['queryid']} mean {f['baseline_ms']:g} -> {f['current_ms']:g} ms (x{f['ratio']})" for f in found[:3])
+    return ToolResult(f"{service}: " + (text if found else ("no statement got slower" if names else "no query statistics reported")),
+                      {"service": service, "queries": found, "tracked": len(names)}, len(found))
+
+
 def error_signatures(ctx: Ctx, service: str, minutes: int = 30) -> ToolResult:
     s = _service(ctx, service)
     minutes = max(5, min(int(minutes), 240))
@@ -214,6 +238,9 @@ REGISTRY = {
                                         "required": ["service"]}),
     "metrics_overview": (metrics_overview, {"description": "Compare current metrics to the baseline for a service.",
                                             "properties": {"service": {"type": "string"}}, "required": ["service"]}),
+    "slow_queries": (slow_queries, {"description": "SQL statements of the service's database that became slower (mean time per query id, "
+                                                   "before and after). Empty if the service reports no query statistics.",
+                                    "properties": {"service": {"type": "string"}}, "required": ["service"]}),
     "error_signatures": (error_signatures, {"description": "Most frequent warning/error log signatures, with first seen times.",
                                             "properties": {"service": {"type": "string"}, "minutes": {"type": "integer"}},
                                             "required": ["service"]}),

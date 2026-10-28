@@ -1,15 +1,18 @@
+import asyncio
 import contextlib
+import json
 import sys
 import time
 from pathlib import Path
 
 import psycopg
+from apgkit import insights as kit_insights
 from apgkit.auth.rp import safe_return_to
-from apgkit.config import env_bool
+from apgkit.config import database_url, env_bool
 from apgkit.guard import SecurityGuard
 from apgkit.web import is_https, mount_kit_static, public_url
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -23,6 +26,7 @@ from . import (
     incidents,
     ingest,
     investigator,
+    live,
     metrics,
     migrate,
     otlp,
@@ -42,6 +46,7 @@ STATIC = Path(__file__).resolve().parent / "static"
 MAX_BODY = 2 * 1024 * 1024
 
 mcp_app = mcp.streamable_http_app(streamable_http_path="/", host="0.0.0.0")
+hub = live.Hub(database_url)      # one LISTEN connection per process, opened when the first browser subscribes
 
 
 _announced = False
@@ -84,6 +89,7 @@ async def lifespan(_: FastAPI):
             yield
     finally:
         housekeeping.stop_background()
+        hub.stop()
 
 
 # --- authentication ---------------------------------------------------------------------------------------
@@ -485,16 +491,33 @@ def test_account(account: str, body: TestBody):
 
 
 
+class ActiveEmbeddingBody(BaseModel):
+    account: str = Field(pattern=r"^(env|\d{1,12})$")
+
+
+@app.put("/api/embeddings/active", dependencies=[Depends(require("settings:manage"))])
+def set_active_embedding(body: ActiveEmbeddingBody):
+    """Choose which embedding provider retrieval uses: a stored account (its embedding model and size) or `env`.
+    The provider is probed first and nothing changes if it fails. A different size than the stored vectors leaves
+    retrieval on text search until `POST /api/embeddings/reembed` converts the columns (see /api/embeddings/status)."""
+    with _translate(), connect() as conn:
+        cfg = embedcfg.from_env() if body.account == "env" else accounts.embedding_config_for(conn, int(body.account))
+        embed_texts(["connection test"], cfg)
+        embedcfg.activate(conn, None if body.account == "env" else int(body.account))
+    with connect_vector() as conn:
+        return {"active_embedding": body.account, **migrate.embedding_status(conn)}
+
+
 @app.get("/api/embeddings/status", dependencies=[Depends(require("settings:manage"))])
 def embeddings_status():
-    """Configured vs stored vector size, rows still lacking a vector and the background job: 'needs re-embedding' lives here."""
+    """Active (stored account or environment) vs stored vector size, rows still lacking a vector and the background job: 'needs re-embedding' lives here."""
     with connect_vector() as conn:
         return migrate.embedding_status(conn)
 
 
 @app.post("/api/embeddings/reembed", dependencies=[Depends(require("settings:manage"))])
 def reembed_embeddings():
-    """Resize the vector columns to EMBEDDING_DIM if needed and re-embed every incident and runbook in the background."""
+    """Resize the vector columns to the active embedding size (EMBEDDING_DIM by default) if needed and re-embed every incident and runbook in the background."""
     with connect_vector() as conn:
         st = migrate.embedding_status(conn)
     if not st["indexable"]:
@@ -580,11 +603,26 @@ def ingest_service(body: ServiceBody):
 
 @app.post("/api/ingest/alerts", dependencies=[Depends(require("ingest:write"))])
 def ingest_alert(body: AlertBody):
-    """Generic alert webhook: opens or joins an incident. An ingest token cannot start an investigation."""
+    """Generic alert webhook: opens or joins an incident. With `investigate: true` a Rules investigation (deterministic,
+    read-only, no model, no cost) is run for an incident nobody has investigated yet and its `run_id` is returned; an
+    ingest token still reads nothing back and cannot choose an AI method. A failed investigation never loses the alert."""
     with _translate(), connect_vector() as conn:
         result = ingest.raise_alert(conn, body.service, body.name, summary=body.summary, severity=body.severity,
                                     labels=body.labels, source=body.source)
         conn.commit()
+        if body.investigate:
+            incident_id = result["incident_id"]
+            if conn.execute("SELECT 1 FROM run WHERE incident_id=%s", (incident_id,)).fetchone():
+                result["investigation"] = "already investigated"
+            else:
+                try:
+                    result["run_id"] = investigator.investigate(conn, incident_id, mode="rules")
+                    result["investigation"] = "done"
+                    metrics.INVESTIGATIONS.labels("rules", "done").inc()
+                except Exception as exc:  # noqa: BLE001 - the alert is already stored; report why no investigation exists
+                    conn.rollback()
+                    metrics.INVESTIGATIONS.labels("rules", "failed").inc()
+                    result["investigation"] = f"failed: {type(exc).__name__}"
     return result
 
 
@@ -661,6 +699,44 @@ async def otlp_traces(request: Request):
 def prometheus_metrics():
     body, ctype = metrics.render()
     return Response(body, media_type=ctype)
+
+
+@app.get("/api/insights", dependencies=[Depends(require("settings:manage"))])
+def database_insights(order: str = Query("total"), limit: int = Query(20, ge=1, le=200)):
+    """What EDB's extensions on AgentPG know about this app's own database (edb_stat_monitor, edb_pg_tuner, query_advisor). Every part
+    degrades to {"available": false, "reason": ...} on plain Postgres. Statement text reveals the workload: administrators only."""
+    order = order if order in ("total", "mean", "calls") else "total"
+    with connect() as conn:
+        return kit_insights.insights_payload(conn, order, limit)
+
+
+@app.get("/api/events", dependencies=[Depends(require("incidents:read"))])
+async def live_events(request: Request):
+    """Server-sent events: `change` for every incident or alert row change (Postgres `tcn`), as {table, op, id} and nothing else, so the
+    browser re-reads through the normal API. `hello` says whether the database sends changes at all (`live`). Keep-alive comments
+    every 15 s; the page keeps its timer-based refresh as the fallback."""
+    try:
+        with connect(retries=1) as conn:
+            live_on = live.available(conn)
+    except (psycopg.Error, RuntimeError) as exc:
+        raise _db_unavailable() from exc
+    sub = hub.subscribe() if live_on else None
+
+    async def stream():
+        try:
+            yield "retry: 5000\n" + f"event: hello\ndata: {json.dumps({'live': live_on})}\n\n"
+            while sub is not None and not await request.is_disconnected():
+                try:
+                    ev = await asyncio.wait_for(sub.queue.get(), 15)
+                except TimeoutError:
+                    yield ": keep-alive\n\n"
+                    continue
+                yield f"event: change\ndata: {json.dumps(ev)}\n\n"
+        finally:
+            if sub is not None:
+                hub.unsubscribe(sub)
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
 @app.get("/api/fleet", dependencies=[Depends(require("dashboard:read"))])

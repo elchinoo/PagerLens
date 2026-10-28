@@ -1,4 +1,4 @@
-"""Which embedding provider is active: a stored account (chosen in the UI) or the environment.
+"""Which embedding provider is active: a stored account (chosen by an administrator) or the environment.
 
 The key is decrypted only at the moment of use, so a locked vault (after a restart) does not break startup;
 it just means external embeddings are unavailable until the admin signs in.
@@ -58,6 +58,26 @@ def reset() -> None:
     """Forget the cached choice (used by tests and after a database reset)."""
     global _active, _loaded
     _active, _loaded = None, False
+
+
+def resolve(conn) -> EmbeddingConfig:
+    """The embedding configuration to use right now: the stored account chosen by the administrator, else the environment."""
+    ensure_loaded(conn)
+    return current()
+
+
+def activate(conn, account: int | None) -> EmbeddingConfig:
+    """Make a stored account (or, with None, the environment) the embedder, and remember the choice in the database."""
+    from .accounts import embedding_config_for  # local import: accounts imports this module
+
+    cfg = embedding_config_for(conn, account) if account is not None else None
+    if account is None:
+        store.delete(conn, SETTING)
+    else:
+        store.put(conn, SETTING, str(account))
+    conn.commit()
+    set_active(cfg)
+    return current()
 
 
 def ensure_loaded(conn) -> None:

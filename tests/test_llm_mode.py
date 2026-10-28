@@ -327,3 +327,30 @@ def test_a_confidently_wrong_grounded_model_cannot_dethrone_the_rules(monkeypatc
     out = run(trigger(key), "hybrid")
     assert out["hyps"][0]["category"] == truth
     assert any(h["category"] == wrong and h["source"] == "llm" for h in out["hyps"])  # still shown, just not trusted
+
+
+# ---- the recording stand-in (scripts/fake_llm.py) --------------------------------------------------
+
+def test_demo_stand_in_model_investigates_end_to_end(monkeypatch):
+    """The fake OpenAI-compatible server used for the video: tools first, then a grounded, deterministic answer."""
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location("fake_llm", Path(__file__).parent.parent / "scripts" / "fake_llm.py")
+    fake_llm = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fake_llm)
+
+    def fake(cfg, messages, max_tokens=700, tools=None):
+        msg = fake_llm.chat_reply({"messages": messages, "tools": tools})
+        return {"text": msg.get("content") or "", "tool_calls": msg.get("tool_calls") or [], "message": msg, "usage": {}}
+
+    monkeypatch.setattr(llm_agent, "chat", fake)
+    out = run(trigger("bad_deploy"), "hybrid")
+    top = out["hyps"][0]
+    assert top["category"] == "bad_deploy" and top["suspect"] == "checkout-api" and top["grounded"] is True
+    assert top["source"] == "both"                       # rules and the stand-in agree
+    assert any("DEMO STAND-IN" in (h["explanation"] or "") for h in out["hyps"])
+    assert [s["tool"] for s in out["steps"] if s["kind"] == "llm"] == [None, None]
+    assert fake_llm.chat_reply({"messages": [{"role": "user", "content": "Reply with the single word OK."}]})["content"] == "OK"
+    vec = fake_llm.hash_embed("pool exhausted", 16)
+    assert len(vec) == 16 and vec == fake_llm.hash_embed("pool exhausted", 16)

@@ -16,6 +16,8 @@ WINDOW_MIN = 90        # minutes of telemetry written
 ONSET_MIN = 20         # the failure began this many minutes before 'now'
 CHUNK = 900
 
+SLOW_QUERYID = "6823950417"   # the statement that regresses in the slow_query scenario (Postgres query ids are signed 64-bit numbers)
+
 # name: (owner, tier, description, depends_on, baseline)
 FLEET: dict[str, dict] = {
     "web-frontend": dict(owner="storefront", tier="edge", description="Public web tier and API gateway",
@@ -31,7 +33,10 @@ FLEET: dict[str, dict] = {
     "inventory-api": dict(owner="fulfilment", tier="standard", description="Stock levels and reservations",
                           depends_on=[],
                           base=dict(request_rate=60, error_rate=0.3, latency_p95_ms=70, cpu_pct=28, mem_pct=48,
-                                    db_connections=6, db_connections_max=20)),
+                                    db_connections=6, db_connections_max=20),
+                          # the kit's db_insights_top_query_mean_seconds as pagerlens-agent stores it: slowq_<queryid>, mean in ms
+                          # (a negative query id is written with a leading m). Generated with its own random stream.
+                          extra={f"slowq_{SLOW_QUERYID}": 12.0, "slowq_m4417203391": 4.0}),
     "search-service": dict(owner="discovery", tier="standard", description="Catalogue search",
                            depends_on=[],
                            base=dict(request_rate=80, error_rate=0.2, latency_p95_ms=110, cpu_pct=40, mem_pct=55)),
@@ -165,6 +170,14 @@ SCENARIOS: dict[str, Scenario] = {s.key: s for s in [
                 ("search-service", 2, "error", "java.lang.OutOfMemoryError: Java heap space")],
         deploys=[("search-service", ONSET_MIN + 3, "v4.2.0", "dev-b", "Cache analyzer results in memory")],
         blurb="The same memory symptoms as a leak, but they began right after a release."),
+    Scenario(
+        "slow_query", "A query regression slows inventory", "slow_query", "inventory-api", "SlowQuery",
+        f"inventory-api: query {SLOW_QUERYID} mean time rose from 12 ms to 480 ms and stayed there", "sev3",
+        metrics=[("inventory-api", f"slowq_{SLOW_QUERYID}", _ramp(12, 480, 3)), ("inventory-api", "latency_p95_ms", _ramp(70, 900, 4)),
+                 ("inventory-api", "error_rate", _ramp(0.3, 2.5, 5)), ("inventory-api", "db_connections", _ramp(6, 11, 4)),
+                 ("checkout-api", "latency_p95_ms", _ramp(180, 420, 5))],
+        errors=[("inventory-api", 2, "warn", "slow query: SELECT qty FROM stock WHERE sku = $1 took <n>ms")],
+        blurb="No deploy and no saturation: one SQL statement's mean time jumps (the fleet's database insights say which)."),
 ]}
 
 RUNBOOKS = [
@@ -215,6 +228,12 @@ RUNBOOKS = [
      "infrastructure there: power, a backhaul link or a local gateway. If the loss is spread out, suspect the "
      "collection path or a credential that expired. Check the last-seen times, the local gateway and the senders' "
      "logs, restore the link, and confirm sensors report again."),
+    ("Slow query regression", "slow_query", None,
+     "Symptoms: p95 latency rises while the connection pool is not full, and one statement's mean time (per query id, "
+     "from the database insights: edb_stat_monitor or pg_stat_statements) jumps and stays up. Open the app's Database "
+     "insights page and find the query id, compare its plan before and after (a changed plan, a missing or unused index, "
+     "stale statistics after a bulk load), run ANALYZE, add or restore the index, or roll back the change that altered the "
+     "statement. Confirm the mean returns to its baseline."),
     ("Sensors sending bad data", "data_quality", None,
      "Symptoms: many readings rejected, values outside physical limits, or sensors repeating the same value. "
      "Identify which types and districts are affected, check for a firmware release, a calibration drift or a "
@@ -268,7 +287,7 @@ def seed_runbooks(conn) -> int:
         vec = None
         if usable:
             try:
-                vec = retrieval.embed_one(f"{title}. {body}")
+                vec = retrieval.embed_one(f"{title}. {body}", conn)
                 if len(vec.to_list()) != fits:
                     raise ValueError(f"the model returned {len(vec.to_list())} dimensions but runbook.embedding has {fits}")
             except Exception as exc:  # noqa: BLE001 - provider, network, vault or size problems: store without a vector
@@ -297,6 +316,7 @@ def generate(conn, scenario: Scenario | None, *, now: datetime | None = None, se
     overlay = {(s, m): f for s, m, f in (scenario.metrics if scenario else [])}
     for name, d in FLEET.items():
         points, logs = [], []
+        xrng = random.Random(f"{seed}:{name}:extra")      # separate stream: adding statements must not change the other series
         for i in range(WINDOW_MIN + 1):
             ts = start + timedelta(minutes=i)
             m = (ts - onset).total_seconds() / 60.0
@@ -307,6 +327,12 @@ def generate(conn, scenario: Scenario | None, *, now: datetime | None = None, se
                     value = f(base, m) * (1 + rng.uniform(-0.02, 0.02)) if metric != "db_connections_max" else value
                 if metric.endswith("_pct"):
                     value = min(value, 100.0)
+                points.append({"name": metric, "value": round(value, 3), "ts": _iso(ts)})
+            for metric, base in d.get("extra", {}).items():
+                value = base * (1 + xrng.uniform(-0.05, 0.05))
+                f = overlay.get((name, metric))
+                if f and m >= 0:
+                    value = f(base, m) * (1 + xrng.uniform(-0.03, 0.03))
                 points.append({"name": metric, "value": round(value, 3), "ts": _iso(ts)})
             for _ in range(rng.randint(1, 2)):
                 logs.append({"ts": _iso(ts + timedelta(seconds=rng.randint(0, 59))), "level": "info",
