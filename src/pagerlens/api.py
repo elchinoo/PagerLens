@@ -7,6 +7,7 @@ from pathlib import Path
 
 import psycopg
 from apgkit import insights as kit_insights
+from apgkit import masking
 from apgkit.auth.rp import safe_return_to
 from apgkit.config import database_url, env_bool
 from apgkit.guard import SecurityGuard
@@ -23,6 +24,7 @@ from . import (
     core,
     dashboard,
     embedcfg,
+    hardening,
     housekeeping,
     incidents,
     ingest,
@@ -46,6 +48,7 @@ from .tools import ToolError
 
 STATIC = Path(__file__).resolve().parent / "static"
 MAX_BODY = 2 * 1024 * 1024
+MASKING_EVERY = 300          # seconds between masking re-asserts (apgkit.masking.reassert_forever)
 
 mcp_app = mcp.streamable_http_app(streamable_http_path="/", host="0.0.0.0")
 hub = live.Hub(database_url)      # one LISTEN connection per process, opened when the first browser subscribes
@@ -86,10 +89,16 @@ def _startup_tasks() -> None:
 async def lifespan(_: FastAPI):
     _startup_tasks()
     housekeeping.start_background()
+    # Grants made after startup (`agentpg db-users create`, default privileges) reopen tables to the read-only role: re-assert the masking.
+    tasks = [asyncio.create_task(masking.reassert_forever(
+        core.db.connect, hardening.apply, MASKING_EVERY, deny=[*hardening.MASKED, *hardening.DENIED], metrics=core.metrics))]
     try:
         async with mcp_app.router.lifespan_context(mcp_app):
             yield
     finally:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         housekeeping.stop_background()
         hub.stop()
 
@@ -183,7 +192,8 @@ def readyz():
     try:
         with connect(retries=1) as conn:
             conn.execute("SELECT 1")
-        return {"status": "ready"}
+        # masking: report only (last re-assert, tables found open before it); drift never makes the app unready
+        return {"status": "ready", "masking": masking.status()}
     except Exception:  # noqa: BLE001 - database may be waking; never echo connection details
         return JSONResponse({"status": "waking-database"}, status_code=503)
 
@@ -836,7 +846,8 @@ def tuning_apply(proposal_id: int, principal=Depends(require("tuning:manage"))):
 async def live_events(request: Request):
     """Server-sent events: `change` for every incident or alert row change (Postgres `tcn`), as {table, op, id} and nothing else, so the
     browser re-reads through the normal API. `hello` says whether the database sends changes at all (`live`). Keep-alive comments
-    every 15 s; the page keeps its timer-based refresh as the fallback."""
+    every 15 s; the page keeps its timer-based refresh as the fallback. The stream opens with ~2 KB of comment padding so a buffering
+    proxy flushes the first frame; the client closes a stream that sends no `hello` within 6 s (see static/live.js)."""
     try:
         with connect(retries=1) as conn:
             live_on = live.available(conn)
@@ -846,7 +857,7 @@ async def live_events(request: Request):
 
     async def stream():
         try:
-            yield "retry: 5000\n" + f"event: hello\ndata: {json.dumps({'live': live_on})}\n\n"
+            yield live.PADDING + "retry: 5000\n" + f"event: hello\ndata: {json.dumps({'live': live_on})}\n\n"
             while sub is not None and not await request.is_disconnected():
                 try:
                     ev = await asyncio.wait_for(sub.queue.get(), 15)

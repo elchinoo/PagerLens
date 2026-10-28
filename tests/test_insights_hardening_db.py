@@ -193,6 +193,30 @@ def test_hardening_is_idempotent_and_survives_the_next_migration(roles):
         r.execute("SELECT * FROM api_token")
 
 
+def test_grants_after_startup_are_reasserted_and_reported(roles, client):
+    """`agentpg db-users create` re-grants SELECT on base tables after the migrate hook ran: the re-assert tick closes them again."""
+    from apgkit import masking
+    deny = [*hardening.MASKED, *hardening.DENIED]
+    with connect() as c:
+        c.execute("GRANT SELECT ON incident, api_token TO a1p_readonly")
+        c.commit()
+    with ro() as r:
+        assert r.execute("SELECT count(*) AS n FROM incident").fetchone()["n"] == 0         # open: the failure being fixed
+    assert masking.reassert_tick(core.db.connect, hardening.apply, deny=deny, metrics=core.metrics)
+    st = masking.status()
+    assert st["ok"] and st["drift"] == 2 and st["last_ok"]
+    with ro() as r:
+        for table in ("incident", "api_token"):
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                r.execute(f"SELECT * FROM {table}")                                       # noqa: S608
+        assert r.execute("SELECT count(*) AS n FROM incident_masked").fetchone()["n"] == 0  # the masked view still works
+    assert masking.reassert_tick(core.db.connect, hardening.apply, deny=deny, metrics=core.metrics)
+    assert masking.status()["drift"] == 0
+    assert "masking_drift_tables 0.0" in core.metrics.render()[0].decode()
+    body = client.get("/readyz")
+    assert body.status_code == 200 and body.json()["masking"]["ok"] is True and body.json()["status"] == "ready"
+
+
 def test_simulator_answer_key_is_hidden_from_the_read_only_role(roles):
     with connect() as c:
         simulator.trigger(c, "bad_deploy")

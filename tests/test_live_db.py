@@ -202,3 +202,5 @@ def test_without_tcn_the_stream_says_so_and_ends(admin):
         assert r.status_code == 200
         body = "".join(r.iter_text())
     assert "event: hello" in body and '"live": false' in body and "event: change" not in body
+    # ~2 KB of comment padding comes first, before `retry:`, so a buffering proxy flushes the first frame
+    assert body.startswith(live.PADDING) and body.index("retry:") >= 2048 and body.index("retry:") < body.index("event: hello")

@@ -23,6 +23,8 @@ CHANNEL = "pl_changes"
 IDLE_CLOSE = 30.0
 TCN_SQL = Path(__file__).resolve().parent / "migrations" / "005_tcn.sql"
 _PAYLOAD = re.compile(r'^"(?P<table>[a-z_]+)",(?P<op>[IUD]),"(?P<key>[a-z_]+)"=\'(?P<id>[^\']*)\'')
+# ~2 KB of SSE comment lines sent before `retry:`: ingress proxies that buffer the first response bytes then flush the first frame.
+PADDING = ": " + "." * 2048 + "\n"
 OPS = {"I": "insert", "U": "update", "D": "delete"}
 
 

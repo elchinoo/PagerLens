@@ -50,6 +50,55 @@ const es3 = (watch(() => {}), sources.at(-1));         // a refused stream (sign
 es3.readyState = 2; es3.onerror();
 if (!es3.closed) fail("a refused stream must fall back, not retry forever");
 
+// 1b. watchdog: a proxy that buffers the stream leaves EventSource CONNECTING with no error and no hello. After 6 s the page closes
+// the stream, polls, and tries the stream once more after 60 s. The fake timers record their delays so the numbers are checked too.
+{
+  const fakeSet = globalThis.setTimeout, delays = new Map();
+  globalThis.setTimeout = (f, ms) => { const t = fakeSet(f, ms); delays.set(t, ms); return t; };
+  const mine = (from) => dom.timers.slice(from).filter((t) => t.live && t.kind === "timeout");
+  let n = dom.timers.length, wd = 0;
+  const w1 = watch(() => { wd++; }, { fallbackMs: 5000 });
+  const s1 = sources.at(-1);
+  const [dog] = mine(n);
+  if (!dog || delays.get(dog) !== 6000) fail("the watchdog must wait 6000 ms for hello, got " + (dog && delays.get(dog)));
+  await dog.f();                                         // 6 s pass with no hello
+  if (!s1.closed || w1.mode() !== "polling") fail("no hello in 6 s must close the stream and poll, mode " + w1.mode());
+  const [retry] = mine(n).filter((t) => t !== dog);
+  if (!retry || delays.get(retry) !== 60000) fail("the stream must be retried once after 60000 ms, got " + (retry && delays.get(retry)));
+  const before = sources.length;
+  await retry.f();                                       // 60 s later: the second try comes up
+  if (sources.length !== before + 1) fail("the retry must open a new stream");
+  const s2 = sources.at(-1);
+  s2.emit("hello", { live: true });
+  if (w1.mode() !== "live") fail("a hello on the retried stream must make the page live again, mode " + w1.mode());
+  w1.stop();
+  if (!s2.closed) fail("stop() must close the retried stream");
+
+  // a stream that never says hello twice is not retried a second time
+  n = dom.timers.length;
+  const w2 = watch(() => {}, { fallbackMs: 5000 });
+  const [dog2] = mine(n);
+  await dog2.f();
+  const [retry2] = mine(n).filter((t) => t !== dog2);
+  await retry2.f();
+  const [dog3] = mine(n).filter((t) => t !== dog2 && t !== retry2);
+  if (!dog3) fail("the retried stream needs its own watchdog");
+  const count = sources.length;
+  await dog3.f();
+  if (w2.mode() !== "polling" || mine(n).filter((t) => ![dog2, retry2, dog3].includes(t)).length) fail("after the retry also fails it must stay on polling, with no third attempt");
+  if (sources.length !== count) fail("no third stream");
+  w2.stop();
+
+  // hello in time cancels the watchdog
+  n = dom.timers.length;
+  const w3 = watch(() => {}, { fallbackMs: 5000 });
+  const [dog4] = mine(n);
+  sources.at(-1).emit("hello", { live: true });
+  if (dog4.live) fail("hello must cancel the watchdog");
+  w3.stop();
+  globalThis.setTimeout = fakeSet;
+}
+
 // 2. the incident list reloads when the server says something changed, and stops listening when the tab is left
 const { initIncidents, stopIncidents } = await import("/static/incidents.js");
 await initIncidents();
