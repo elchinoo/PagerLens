@@ -17,6 +17,8 @@ def main(argv: list[str] | None = None) -> int:
     ev = sub.add_parser("eval", help="before/after learning evaluation on the simulator (resets demo telemetry)")
     ev.add_argument("--mode", choices=["rules", "llm", "hybrid"], default="rules")
     ev.add_argument("--account", default=None, help="chat account id, or 'env'; AI modes spend provider credit")
+    tn = sub.add_parser("tuning", help="propose-and-approve tuning of PagerLens' own database (never touches monitored systems)")
+    tn.add_argument("action", choices=["scan", "list"], help="scan: look for improvements and record proposals; list: show them")
     sub.add_parser("reembed", help="resize the vector columns to EMBEDDING_DIM if needed and re-embed incidents and runbooks")
     sub.add_parser("serve", help="run the API + MCP server")
     sub.add_parser("reset-admin", help="forget the admin password and delete stored provider keys (recovery)")
@@ -52,6 +54,19 @@ def main(argv: list[str] | None = None) -> int:
                                               account=args.account, chat_cfg=cfg)
             print(incidents.get_incident(conn, args.incident_id)["report"]["markdown"])
         print(f"\n(run #{run_id})")
+    elif args.cmd == "tuning":
+        from . import tuning
+        from .db import connect
+
+        with connect() as conn:
+            if args.action == "scan":
+                out = tuning.scan(conn, "cli")
+                print(f"{len(out['created'])} new proposal(s), {out['skipped']} already known")
+                for note in out["notes"]:
+                    print("note:", note)
+            else:
+                for r in tuning.list_proposals(conn):
+                    print(f"#{r['id']:<4} {r['status']:9} {r['source']:10} {r['target']:14} {r['statement'][:90]}")
     elif args.cmd == "eval":
         from . import evaluate
         from .db import connect_vector

@@ -8,6 +8,7 @@
                                            verify: every scene lasts at least its audio + 0.7 s, audio and video lengths agree,
                                            no silence over 3.5 s except the deliberate [pause] gaps of the narration, and no
                                            picture frozen for more than 10 s (exit code 1 on a failure)
+  narration.py sync                        verify that section 3 of docs/VIDEO-SCRIPT.md mirrors docs/video/narration.txt word for word
   narration.py mux <out_dir> <webm> <scenes.json> <mp4> <srt>
                                            place each scene's audio at its recorded start, encode H.264 yuv420p + AAC with
                                            +faststart, and write the captions (.srt, also embedded as a soft subtitle track)
@@ -64,6 +65,27 @@ def cmd_audio(out: Path) -> None:
     stamp.write_text(digest)
     # keep the file name the rest of the build uses
     (out / "timing.json").write_text((out / "narration.json").read_text())
+
+
+def scene_texts() -> dict[str, str]:
+    """{scene: spoken text} from narration.txt (pauses and beats removed, paragraphs joined)."""
+    out: dict[str, list[str]] = {}
+    cur = None
+    for line in (HERE / "narration.txt").read_text().splitlines():
+        m = re.match(r"##\s+(\S+)", line)
+        if m:
+            cur = m.group(1); out[cur] = []
+        elif cur and line.strip() and line.strip() != "..." and not re.fullmatch(r"\[pause\s+[\d.]+\]", line.strip()):
+            out[cur].append(line.strip())
+    return {k: " ".join(v) for k, v in out.items()}
+
+
+def cmd_sync() -> None:
+    script = (HERE.parent / "VIDEO-SCRIPT.md").read_text()
+    bad = [k for k, t in scene_texts().items() if f"\n{k}. {t}\n" not in script]
+    if bad:
+        sys.exit(f"docs/VIDEO-SCRIPT.md section 3 is out of sync with narration.txt for scene(s) {', '.join(bad)}")
+    print("script and narration are in sync")
 
 
 def srt_time(t: float) -> str:
@@ -182,7 +204,9 @@ def cmd_check(out: Path, scenes_json: Path, mp4: Path) -> None:
 
 if __name__ == "__main__":
     a = sys.argv[1:]
-    if len(a) == 2 and a[0] == "audio":
+    if a == ["sync"]:
+        cmd_sync()
+    elif len(a) == 2 and a[0] == "audio":
         cmd_audio(Path(a[1]))
     elif len(a) == 4 and a[0] == "check":
         cmd_check(Path(a[1]), Path(a[2]), Path(a[3]))

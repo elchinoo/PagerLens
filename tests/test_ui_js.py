@@ -18,7 +18,7 @@ def test_every_ui_module_parses(js):
 
 
 @pytest.mark.skipif(not (ROOT.parent / "agentpg-kit/src/apgkit/static").is_dir(), reason="the sibling agentpg-kit checkout is not present")
-@pytest.mark.parametrize("script", ["dashboard_typing.mjs", "incident_typing.mjs", "housekeeping_typing.mjs", "dialogs.mjs", "live_insights.mjs"])
+@pytest.mark.parametrize("script", ["dashboard_typing.mjs", "incident_typing.mjs", "housekeeping_typing.mjs", "dialogs.mjs", "live_insights.mjs", "ask_tab.mjs", "tuning_tab.mjs"])
 def test_fake_dom_checks(script):
     r = subprocess.run([NODE, str(ROOT / "tests/ui" / script)], capture_output=True, text=True, timeout=60)
     assert r.returncode == 0 and r.stdout.startswith("ok"), r.stdout + r.stderr

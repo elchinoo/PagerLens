@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from . import (
     __version__,
     accounts,
+    ask,
     core,
     dashboard,
     embedcfg,
@@ -31,6 +32,7 @@ from . import (
     migrate,
     otlp,
     simulator,
+    tuning,
     vault,
 )
 from . import chat as chatter
@@ -527,6 +529,61 @@ def reembed_embeddings():
     return {"started": True}
 
 
+# --- Ask PagerLens: conversational diagnostics -----------------------------------------------------------------------
+
+class AskMessage(BaseModel):
+    role: str = Field(pattern="^(user|assistant)$")
+    content: str = Field(max_length=ask.MAX_QUESTION_CHARS)
+
+
+class AskBody(BaseModel):
+    messages: list[AskMessage] = Field(min_length=1, max_length=ask.MAX_MESSAGES_IN)
+    conversation_id: str | None = Field(default=None, max_length=40)
+    account: str | None = Field(default=None, pattern=r"^(env|\d{1,12})$")
+
+
+SUGGESTED_QUESTIONS = ["Why is checkout-api failing?", "Have we seen this before?", "What is slow in the database?"]
+
+
+def _ask_owner(principal) -> str:
+    return f"{principal.kind}:{principal.subject}"
+
+
+@app.get("/api/ask")
+def ask_state(principal=Depends(require("incidents:read"))):
+    """What the Ask tab needs before the first question: whether a chat account can answer, the suggested questions and the limits."""
+    ready, reason = True, ""
+    try:
+        with connect() as conn:
+            ask.pick_account(conn, principal.can("incidents:investigate"), None)
+    except accounts.AccountError as exc:
+        ready, reason = False, str(exc)
+    return {"ready": ready, "reason": reason, "suggestions": SUGGESTED_QUESTIONS,
+            "limits": {"per_minute": ask.per_minute(), "max_question_chars": ask.MAX_QUESTION_CHARS,
+                       "max_tool_calls": ask.MAX_TOOL_CALLS}}
+
+
+@app.post("/api/ask")
+def ask_pagerlens(body: AskBody, principal=Depends(require("incidents:read"))):
+    """Answer a plain-English question about the services, incidents, evidence, runbooks and this database. A bounded loop of a model
+    over read-only tools; the answer's [incident #N] / [evidence #N] / [runbook #N] citations are verified by the server and only the
+    verified ones come back as `sources`. Only people who may investigate can choose the chat account; everyone else uses the default."""
+    with _translate():
+        with connect() as conn:
+            cfg = ask.pick_account(conn, principal.can("incidents:investigate"), body.account)
+            cfg.api_key()                   # raises VaultLocked now, before anything runs
+        try:
+            result = ask.run_turn(cfg, _ask_owner(principal), [m.model_dump() for m in body.messages], body.conversation_id)
+        except ask.RateLimited as exc:
+            metrics.ASKED.labels("rate_limited").inc()
+            raise HTTPException(429, str(exc)) from exc
+        except Exception:
+            metrics.ASKED.labels("failed").inc()
+            raise
+    metrics.ASKED.labels("answered" if result["grounded"] else "unverified").inc()
+    return result
+
+
 # --- ingest: write-only for 'ingest' tokens -------------------------------------------------------
 
 class LogsBody(BaseModel):
@@ -708,6 +765,71 @@ def database_insights(order: str = Query("total"), limit: int = Query(20, ge=1, 
     order = order if order in ("total", "mean", "calls") else "total"
     with connect() as conn:
         return kit_insights.insights_payload(conn, order, limit)
+
+
+# --- tuning: propose, approve, (optionally) apply -------------------------------------------------------------------------
+# Everything here is administrator-only (statements show the workload). PagerLens only ever changes ITS OWN database, and only
+# when PAGERLENS_ALLOW_TUNING_APPLY=true; for monitored apps it writes advice.
+
+class DecideBody(BaseModel):
+    decision: str = Field(pattern="^(approve|reject)$")
+    note: str | None = Field(default=None, max_length=500)
+
+
+def _actor(principal) -> str:
+    return principal.actor if principal.source == "oidc" else "operator"
+
+
+@app.get("/api/tuning", dependencies=[Depends(require("tuning:manage"))])
+def tuning_list(status: str | None = Query(None, pattern="^(proposed|approved|rejected|applied|failed)$")):
+    with connect() as conn:
+        return {"proposals": tuning.list_proposals(conn, status), "apply_enabled": tuning.apply_enabled(),
+                "statement_timeout_seconds": tuning.statement_timeout_seconds(),
+                "note": "PagerLens only ever changes its own database, and only when PAGERLENS_ALLOW_TUNING_APPLY=true; "
+                        "for monitored apps it only writes advice."}
+
+
+@app.post("/api/tuning/scan")
+def tuning_scan(principal=Depends(require("tuning:manage"))):
+    """Look for improvements now (the background job does the same on a schedule): new proposals from the query advisor and
+    the fleet's slow-query findings. Creating a proposal changes nothing."""
+    with _translate(), connect() as conn:
+        return tuning.scan(conn, _actor(principal))
+
+
+@app.get("/api/tuning/{proposal_id}", dependencies=[Depends(require("tuning:manage"))])
+def tuning_get(proposal_id: int):
+    with _translate(), connect() as conn:
+        try:
+            return tuning.get(conn, proposal_id)
+        except tuning.TuningError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/api/tuning/{proposal_id}/decide")
+def tuning_decide(proposal_id: int, body: DecideBody, principal=Depends(require("tuning:manage"))):
+    with _translate(), connect() as conn:
+        try:
+            return tuning.decide(conn, proposal_id, body.decision, body.note, _actor(principal))
+        except tuning.TuningError as exc:
+            raise HTTPException(404 if str(exc) == "proposal not found" else 409, str(exc)) from exc
+
+
+@app.post("/api/tuning/{proposal_id}/apply")
+def tuning_apply(proposal_id: int, principal=Depends(require("tuning:manage"))):
+    """Apply one approved proposal to PagerLens' own database. Off unless PAGERLENS_ALLOW_TUNING_APPLY=true (403 otherwise). Runs only a
+    statement that passes the allow-list parser, one at a time, with a statement timeout, and records an EXPLAIN-based before and after."""
+    with _translate():
+        try:
+            return tuning.apply(proposal_id, _actor(principal))
+        except tuning.ApplyDisabled as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except tuning.Busy as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except tuning.StatementRejected as exc:
+            raise HTTPException(422, f"refused by the allow-list: {exc}") from exc
+        except tuning.TuningError as exc:
+            raise HTTPException(404 if str(exc) == "proposal not found" else 409, str(exc)) from exc
 
 
 @app.get("/api/events", dependencies=[Depends(require("incidents:read"))])

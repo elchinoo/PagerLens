@@ -58,6 +58,15 @@ MASKED: dict[str, tuple[str, dict[str, str]]] = {
     "log_event": ("log_event_masked", {
         "id": "pass", "service_id": "pass", "ts": "pass", "level": "pass", "signature": "pass",
         "message": scrub_expr("message"), "fields": scrub_expr("fields", jsonb=True)}),
+    # tuning proposals name people who decided and statements that show the workload: names become an initial, text is scrubbed
+    "tuning_proposal": ("tuning_proposal_masked", {
+        "id": "pass", "source": "pass", "target": "pass", "applicable": "pass", "status": "pass", "motivating_queryid": "pass",
+        "decided_at": "pass", "applied_at": "pass", "created_at": "pass", "before_timing": "pass", "after_timing": "pass",
+        "decided_by": "initial", "applied_by": "initial", "statement": scrub_expr("statement"), "rationale": scrub_expr("rationale"),
+        "estimated_benefit": scrub_expr("estimated_benefit"), "motivating_query": scrub_expr("motivating_query"),
+        "decision_note": scrub_expr("decision_note"), "error": scrub_expr("error")}),
+    "tuning_audit": ("tuning_audit_masked", {
+        "id": "pass", "proposal_id": "pass", "action": "pass", "at": "pass", "actor": "initial", "detail": scrub_expr("detail")}),
 }
 
 # Secrets, hashes, ciphertext, sessions and the simulator's answer key: no view, no access.

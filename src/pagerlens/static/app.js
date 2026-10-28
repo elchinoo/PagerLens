@@ -1,4 +1,5 @@
 import { api } from "/kit/api.js";
+import { initAsk } from "/static/ask.js";
 import { initConnect } from "/static/connect.js";
 import { initDashboard, stopDashboard } from "/static/dashboard.js";
 import { initDatabase } from "/static/dbinsights.js";
@@ -7,11 +8,12 @@ import { initLab } from "/static/lab.js";
 import { initRunbooks } from "/static/runbooks.js";
 import { initService, stopService } from "/static/service.js";
 import { initSettings } from "/static/settings.js";
+import { initTuning } from "/static/tuning.js";
 import { bootSession, can, refreshSession, renderLogin, renderSetup, renderVaultBanner, state } from "/kit/session.js";
 import { $, h } from "/kit/ui.js";
 
-const TABS = ["dashboard", "service", "incidents", "runbooks", "lab", "insights", "settings", "connect"];
-const INIT = { dashboard: initDashboard, service: initService, incidents: initIncidents, lab: initLab, runbooks: initRunbooks, insights: initDatabase, settings: initSettings, connect: initConnect };
+const TABS = ["dashboard", "service", "incidents", "ask", "runbooks", "lab", "insights", "tuning", "settings", "connect"];
+const INIT = { dashboard: initDashboard, service: initService, incidents: initIncidents, ask: initAsk, lab: initLab, runbooks: initRunbooks, insights: initDatabase, tuning: initTuning, settings: initSettings, connect: initConnect };
 const SECTIONS = ["auth-card", "vault-banner", "nav", "signout", ...TABS.map((t) => "view-" + t)];
 
 function hideAll() { for (const id of SECTIONS) $(id).hidden = true; }
@@ -33,7 +35,7 @@ async function boot(notice = "") {
 }
 
 // What each tab needs; the server enforces it, this only hides what a role would be refused.
-const NEEDS = { dashboard: "dashboard:read", service: "dashboard:read", incidents: "incidents:read", runbooks: "runbooks:read", lab: "simulator:run", insights: "settings:manage", settings: "settings:manage", connect: "mcp:use" };
+const NEEDS = { dashboard: "dashboard:read", service: "dashboard:read", incidents: "incidents:read", ask: "incidents:read", runbooks: "runbooks:read", lab: "simulator:run", insights: "settings:manage", tuning: "tuning:manage", settings: "settings:manage", connect: "mcp:use" };
 
 function showApp() {
   $("auth-card").hidden = true;

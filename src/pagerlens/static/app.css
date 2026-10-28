@@ -102,3 +102,21 @@ details.help { margin-top: 1.5rem; } details.help summary { cursor: pointer; fon
 details.help .danger-zone { border: 0; padding: 0; box-shadow: none; margin-top: .5rem; }
 .bulk { margin-top: 1rem; } .bulk .btns { margin-top: .6rem; }
 td.pick { width: 1.5rem; }
+
+/* ---- Ask and Tuning ---- */
+.ask-log { min-height: 10rem; max-height: 32rem; overflow-y: auto; margin-top: .6rem; }
+.msg { padding: .6rem .9rem; border-radius: 12px; margin: .5rem 0; border: 1px solid var(--line); }
+.msg.user { background: color-mix(in srgb, var(--brand) 8%, transparent); margin-left: 2rem; }
+.msg.assistant { background: var(--surface); margin-right: 2rem; }
+.msg .who { margin: 0 0 .15rem; font-size: .78rem; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); }
+.msg .text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.sources { list-style: none; display: flex; flex-wrap: wrap; gap: .4rem; padding: 0; margin: .3rem 0 0; }
+.sources .chip { display: inline-flex; gap: .3rem; align-items: baseline; text-decoration: none; }
+.sources .chip-ref { font-weight: 700; }
+.unverified { margin: .5rem 0 0; padding: .4rem .6rem; border-radius: 8px; background: var(--warn-bg); color: var(--warn); font-size: .9rem; }
+.typing { padding: .6rem 0; }
+.ask-form { margin-top: .8rem; }
+.ask-form textarea { min-height: 3.2rem; }
+.compare table { width: 100%; }
+.compare .ok-line { color: var(--ok); font-weight: 600; margin: .4rem 0 0; }
+.compare h4 { margin: .8rem 0 .3rem; }

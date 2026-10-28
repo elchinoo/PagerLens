@@ -20,8 +20,9 @@ Contents
 14. [Testing and development](#14-testing-and-development)
 15. [AIDB and AgentPG integration](#15-aidb-and-agentpg-integration)
 16. [Known limitations and unverified claims](#16-known-limitations-and-unverified-claims)
+17. [Chat, agents, tuning and self-healing: what is built and what is not](#17-chat-agents-tuning-and-self-healing-what-is-built-and-what-is-not)
 
-Also: [EDB and AgentPG capabilities used by this app](#edb-and-agentpg-capabilities-used-by-this-app) (inside section 15) and [Watching the fleet's databases](#watching-the-fleets-databases-slow-queries) (section 10).
+Also: [Ask PagerLens](#710-ask-pagerlens-conversational-diagnostics) and [Tuning](#711-tuning-propose-and-approve) (section 7), [Connect Claude Code to PagerLens and the fleet databases](#91-connect-claude-code-to-pagerlens-and-the-fleet-databases) (section 9), [EDB and AgentPG capabilities used by this app](#edb-and-agentpg-capabilities-used-by-this-app) (inside section 15) and [Watching the fleet's databases](#watching-the-fleets-databases-slow-queries) (section 10).
 
 ---
 
@@ -162,10 +163,12 @@ Components, as implemented in `src/pagerlens/`:
 | `live.py` | Live updates: the `tcn` triggers' notifications, one LISTEN connection, fan-out to server-sent events |
 | `hardening.py` | After-migrate hook for the read-only role: masked views for personal data, REVOKE for secrets |
 | `accounts.py`, `chat.py`, `llm_http.py`, `netguard.py` | Provider accounts (keys encrypted), chat calls, bounded HTTP, URL guard |
-| `mcp_server.py` | The nine MCP tools |
+| `ask.py` | Ask PagerLens: the bounded tool-calling loop over nine read-only tools, the citation check, in-memory conversations, the rate limit (section 7.10) |
+| `tuning.py` | Propose-and-approve tuning: the allow-list parser, proposals from the kit's insights and the slow-query findings, decisions, apply with an EXPLAIN-based before and after (section 7.11) |
+| `mcp_server.py` | The ten MCP tools |
 | `agent.py` | `pagerlens-agent`, the pull collector |
 | `cli.py` | The `pagerlens` command |
-| `migrations/001..005_*.sql` | Plain-SQL schema (005 adds the guarded `tcn` triggers), applied by name; `{{EMBEDDING_DIM}}` is substituted at migration time |
+| `migrations/001..006_*.sql` | Plain-SQL schema (005 adds the guarded `tcn` triggers, 006 the `tuning_proposal` and `tuning_audit` tables), applied by name; `{{EMBEDDING_DIM}}` is substituted at migration time |
 
 Design choices: plain SQL migrations and no ORM, no queue (investigations are synchronous and bounded), single-tenant data, and the ground truth of simulated incidents in a table (`sim_truth`) that the investigation code never reads.
 
@@ -269,7 +272,14 @@ All variables below were checked in `config.py`, `core.py`, `cli.py`, `housekeep
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PAGERLENS_HOUSEKEEPING` | true | `false` stops this process's background auto-resolve thread. The runtime switch is the `auto_resolve_minutes` setting (0 = off) |
+| `PAGERLENS_HOUSEKEEPING` | true | `false` stops this process's background auto-resolve thread (and the tuning scan below). The runtime switch is the `auto_resolve_minutes` setting (0 = off) |
+| `PAGERLENS_ASK_PER_MINUTE` | 10 | Questions one caller may ask in Ask per minute (429 beyond it) |
+| `PAGERLENS_ASK_GLOBAL_PER_MINUTE` | 60 | Questions all callers together may ask per minute |
+| `PAGERLENS_ALLOW_TUNING_APPLY` | false | `true` lets an administrator APPLY an approved tuning proposal to PagerLens' own database. Off by default: approving then only records a decision (section 7.11) |
+| `PAGERLENS_TUNING_STATEMENT_TIMEOUT_SECONDS` | 60 | Statement timeout of the apply session (1 to 600) |
+| `PAGERLENS_TUNING_LOCK_TIMEOUT_SECONDS` | 5 | Lock timeout of the apply session (1 to 60) |
+| `PAGERLENS_TUNING_SCAN_MINUTES` | 60 | The background job that looks for improvements runs this often (0 = off). It only writes proposals |
+| `PAGERLENS_SELF_SERVICE` | `pagerlens` | The service name under which PagerLens monitors itself; a slow-query finding for that name may become an index proposal for its own database, any other name is advice only |
 
 ### Runtime settings (stored in the database, not the environment)
 
@@ -310,7 +320,7 @@ Agent YAML keys (checked in `agent.py`): `pagerlens.url`, `pagerlens.token_env`,
 
 ## 7. Using PagerLens: the web app
 
-The navigation tabs are shown according to the signed-in permissions: **Dashboard**, **Incidents**, **Runbooks**, **Lab**, **Database** (administrators), **Settings**, **Connect**. The server enforces access; the UI only hides what a role would be refused. Hash routes: `#dashboard`, `#service/<name>`, `#incidents`, `#incidents/<id>`, `#runbooks`, `#lab`, `#insights`, `#settings`, `#connect`.
+The navigation tabs are shown according to the signed-in permissions: **Dashboard**, **Incidents**, **Ask**, **Runbooks**, **Lab**, **Database** (administrators), **Tuning** (administrators), **Settings**, **Connect**. The server enforces access; the UI only hides what a role would be refused. Hash routes: `#dashboard`, `#service/<name>`, `#incidents`, `#incidents/<id>`, `#ask`, `#runbooks`, `#lab`, `#insights`, `#tuning`, `#settings`, `#connect`.
 
 ### 7.1 Dashboard
 
@@ -375,6 +385,52 @@ The **Database** tab (`#insights`, needs `settings:manage`) is the kit's query-i
 
 Shows MCP client configuration snippets for your URL (Claude Code, VS Code, OpenCode, Codex CLI, Cursor, Windsurf, Gemini CLI, Cline, Zed, Claude Desktop through `mcp-remote`) with a **Copy** button. The same snippets are in the README.
 
+### 7.10 Ask PagerLens: conversational diagnostics
+
+The **Ask** tab (`#ask`, needs `incidents:read`) is a chat. You type a question in plain English; PagerLens lets a model look things up with read-only tools and answers with citations that **the server verifies**. Suggested questions: "Why is checkout-api failing?", "Have we seen this before?", "What is slow in the database?". Enter sends, Shift+Enter adds a line; while it works the log shows a typing state; an error shows with **Try again**; **New conversation** starts over. The conversation and a half-typed question survive leaving the tab. Text from the server is always rendered as text (strict CSP, no HTML parsing), and a source link is only built from the strict pattern `#incidents/<n>` or `#runbooks`.
+
+How a question is answered (`ask.py`):
+
+| Step | Detail |
+|---|---|
+| Account | `POST /api/ask` uses the environment chat account, else the first stored account with a chat model. Only people who may investigate (`incidents:investigate`) can name another account; a reader's `account` field is ignored. A locked vault is a 423 before anything runs; no account at all is a 422 that says so (`GET /api/ask` reports `ready` and the reason; the tab shows it) |
+| Tools | Nine read-only tools: `list_services`, `list_incidents`, `get_incident`, `get_evidence`, `similar_incidents`, `search_runbooks`, `slow_queries`, `get_timeline` and `database_health` (the kit's `insights_payload` for PagerLens's own database: slowest statements, `edb_pg_tuner` recommendations, `query_advisor` hints, plus the number of open tuning proposals; each part degrades on its own and says why). Each result carries a `cite` marker such as `[incident #12]` |
+| Read-only for real | The whole turn runs on a connection opened `READ ONLY`: the database refuses a write whatever the code does (tested). Unknown tools (for example `mark_root_cause`, `execute_sql`) and unknown arguments are refused and the model is told |
+| Untrusted data | Every tool result (log text, alert text, incident titles, notes, statement text) reaches the model fenced as `<untrusted_data>`, truncated at 6000 characters, with any attempt to close the fence removed; the system prompt says never to follow it. A fooled model still cannot change anything: it has no tool that does |
+| Bounds | At most 6 rounds, 4 tool calls per round, 10 tool calls per question, 60 s wall clock, 40 000 tokens (prompt plus completion) per question, 900 tokens per reply; past a limit the model must answer with what it has and the answer says so. Questions are limited to 1000 characters, answers are scrubbed and cut at 2000. A rate limit applies per caller and overall (`PAGERLENS_ASK_PER_MINUTE`, `PAGERLENS_ASK_GLOBAL_PER_MINUTE`; in memory and per process) |
+| Conversation | A short server-side id (16 hex characters) names a conversation held **in memory only**: at most 200 conversations, 12 messages each, one hour, bound to the credential that started it (another caller's id is simply unknown and starts a new conversation). Messages are scrubbed before they are kept (emails, key shapes and so on), so no raw secret is stored. A known conversation trusts its own record, not the client's copy |
+| Citations | The answer must cite sources as `[incident #N]`, `[evidence #N]` (an observation) or `[runbook #N]`. For each one the server checks that the record **exists** and that this conversation **read it through a tool**. Pass: it is returned in `sources` (the chips under the answer). Fail: the marker stays in the text but flagged, for example `[incident #99: UNVERIFIED, not found]` or `[runbook #3: UNVERIFIED, not read in this conversation]`, and it is listed in `unverified`. An answer with no verified source carries a warning. `grounded` is true only when there is at least one verified source and no unverified one |
+
+Response of `POST /api/ask` (body: `messages` of `{role: user|assistant, content}` ending with the question, optional `conversation_id`, optional `account`): `{conversation_id, answer, sources: [{type, id, ref, label, link, verified}], unverified: [{type, id, ref, reason}], grounded, warnings, steps: [{tool, args}], usage: {llm_calls, prompt_tokens, completion_tokens}}`.
+
+What "verified" does and does not mean: the cited record exists and the model actually read it in this conversation. It does **not** prove the record supports the sentence it is attached to; a person still reads the chip. The wording and the reasoning come from a model and have only been exercised against the scripted stand-ins (section 16). The demo stand-in `scripts/fake_llm.py` answers the three suggested questions deterministically by really calling these tools, so a recording is reproducible and every chip is real (section 14).
+
+### 7.11 Tuning: propose and approve
+
+The **Tuning** tab (`#tuning`, administrators: permission `tuning:manage`) is the safe form of "proactive performance tuning". PagerLens writes **proposals**; a person approves or rejects each one with a note; applying is a separate, admin-only, audited act that is **off unless `PAGERLENS_ALLOW_TUNING_APPLY=true`**.
+
+Where proposals come from (**Look for improvements**, `POST /api/tuning/scan`, `pagerlens tuning scan`, and a background job every `PAGERLENS_TUNING_SCAN_MINUTES`, default 60; creating a proposal changes nothing):
+
+| Source | What it proposes | Applicable |
+|---|---|---|
+| `advisor` (`query_advisor` through the kit) | `CREATE INDEX CONCURRENTLY IF NOT EXISTS pl_ix_<table>_<column> ON public.<table> (<column>)` for a filtered column of a table PagerLens owns, with the observed rows-filtered figures as the rationale; and `CREATE STATISTICS ... (dependencies) ON a, b FROM public.<table>` when two or more columns of one table are filtered. The statement from `edb_stat_monitor` that mentions the table and column is kept as the motivating query | yes |
+| `tuner` (`edb_pg_tuner`) | The recommended server settings, shown as `ALTER SYSTEM SET ...` text | no: advice. PagerLens never changes a server setting; a person does it through the platform |
+| `slow_query` (the `slow_queries` findings of the fleet) | For the service named by `PAGERLENS_SELF_SERVICE` (default `pagerlens`), when its slow statement is in its own insights and the advisor has a matching index hint: an index proposal. For **every other service**: written advice naming the service, the query id and the before and after means | only the first kind |
+
+The table `tuning_proposal` holds `id`, `source`, `target` (`self` or the monitored service), `statement`, `applicable`, `rationale`, `estimated_benefit`, the motivating query id and text, `status` (`proposed`, `approved`, `rejected`, `applied`, `failed`), `decided_by`, `decided_at`, `decision_note`, `applied_by`, `applied_at`, `before_timing` and `after_timing` (JSON), `error`. `tuning_audit` records every scan, creation, decision, refused apply, apply start, success and failure with the actor; the application never updates or deletes it. A rejected or applied statement is not proposed again.
+
+**Apply** (`POST /api/tuning/{id}/apply`):
+
+1. Refused with 403 unless `PAGERLENS_ALLOW_TUNING_APPLY=true`; refused (409) unless the proposal is `approved`, `target` is `self` and it is applicable; one apply at a time across replicas (advisory lock; 409 otherwise).
+2. The stored statement is parsed again by the **allow-list parser**. It cuts the text into tokens and refuses any character outside letters, digits, underscore, comma, dot and parentheses (so no quotes, comments, semicolons inside, backslashes or dollar quoting), allows one trailing semicolon, and accepts only `CREATE INDEX [CONCURRENTLY] [IF NOT EXISTS] [name] ON public.<table> [USING btree] (<col> [ASC|DESC], ... up to 4)` and `CREATE STATISTICS [IF NOT EXISTS] <name> [(ndistinct|dependencies|mcv, ...)] ON <col>, <col>, ... FROM public.<table>`. Identifiers are plain lower-case words; the schema must be `public`; `DROP`, `ALTER`, a second statement, other schemas, `UNIQUE`, `WHERE`, expressions, `INCLUDE`, `WITH` and quoted names are all refused (the tests list about a hundred variants). The table and columns must exist in this database. A refused statement marks the proposal `failed`.
+3. What runs is **rebuilt from the parsed pieces** with quoted identifiers, never the submitted text. `CREATE STATISTICS` is followed by `ANALYZE` of that one table (built from the validated name), because the definition only takes effect at the next analyze.
+4. Session: autocommit (a concurrent build cannot run in a transaction), `statement_timeout` (default 60 s) and `lock_timeout` (default 5 s). Success sets `applied`; an error is stored on the proposal (`failed`), and for a concurrent index build the message warns that an INVALID index with that name may remain to be dropped by hand.
+5. **Before and after**: if the proposal has a motivating statement that is a single `SELECT`, `EXPLAIN (GENERIC_PLAN, FORMAT JSON)` is taken before and after, inside a read-only transaction and without `ANALYZE` (nothing is executed). Stored: total cost, rows and the scan nodes (`Seq Scan on t` then `Index Scan on t using pl_ix_t_c`). These are **estimated cost units, not milliseconds**. When no statement is known, or the kit's 300-character cut makes it unparseable, the record says why instead of inventing a number.
+
+**What it never does:** connect to another database (the apply path takes only the proposal id and the actor, and the grammar has no database part), change a monitored system (for those it only writes advice, `applicable = false`), change a server setting, or run anything the parser does not recognise. The statements show the workload, so the whole tab and its API are administrator-only, and the read-only database role sees `tuning_proposal` and `tuning_audit` only through masked views (`hardening.py`).
+
+Not verified: the advisor and tuner paths were tested with the kit's payload shape and with plain Postgres (where they say "not available"), not against a live `query_advisor` or `edb_pg_tuner`; the apply path and the EXPLAIN before and after were exercised on a local PostgreSQL 17 (`GENERIC_PLAN` needs PostgreSQL 16 or newer).
+
 ## 8. Using PagerLens: the REST API
 
 Bearer tokens go in `Authorization: Bearer <token>`. Browser sessions use the `pl_session` cookie plus the header `X-PagerLens-CSRF` on state-changing `/api/` requests (bearer-token requests need no CSRF header). Interactive API docs are disabled (`docs_url`, `redoc_url` and `openapi_url` are off). Every route and its permission, from `api.py`:
@@ -411,6 +467,13 @@ Bearer tokens go in `Authorization: Bearer <token>`. Browser sessions use the `p
 | `GET /api/runbooks` | `runbooks:read` | Runbooks |
 | `GET /api/simulator/scenarios` | `incidents:read` | Scenario catalog and categories |
 | `GET /api/insights?order=&limit=` | `settings:manage` | Database insights (EDB extensions); each part `{available: false, reason}` where the extension is missing |
+| `GET /api/ask` | `incidents:read` | Ask state: `ready` (a chat account exists) and why not, the suggested questions, the limits |
+| `POST /api/ask` | `incidents:read` | Body `{messages: [{role, content}], conversation_id?, account?}`. A bounded model loop over read-only tools; returns `{conversation_id, answer, sources, unverified, grounded, warnings, steps, usage}`; citations are verified by the server (section 7.10). 422 no chat account or bad input, 423 locked vault, 429 rate limit, 502 provider failure |
+| `GET /api/tuning?status=` | `tuning:manage` | Proposals, `apply_enabled`, the statement timeout |
+| `GET /api/tuning/{id}` | `tuning:manage` | One proposal with its audit trail |
+| `POST /api/tuning/scan` | `tuning:manage` | Look for improvements now: `{created, skipped, notes}` |
+| `POST /api/tuning/{id}/decide` | `tuning:manage` | Body `{decision: approve\|reject, note?}`; only a `proposed` one (409 otherwise) |
+| `POST /api/tuning/{id}/apply` | `tuning:manage` | Apply an approved proposal to PagerLens' own database. 403 while `PAGERLENS_ALLOW_TUNING_APPLY` is not true, 409 wrong state, advice, or another apply running, 422 refused by the allow-list |
 | `GET /api/events` | `incidents:read` | Server-sent events: `hello` `{live}`, then `change` `{table, op, id}` for incident and alert changes |
 | `POST /api/simulator/trigger`, `/baseline` | `simulator:run` | Break the demo shop; reset to healthy |
 
@@ -441,11 +504,42 @@ Endpoint: `https://<your-host>/mcp` (streamable HTTP; `/mcp` is served directly 
 | `get_timeline` | `mcp:use` | `incident_id` | The report's timeline lines, or a note that no investigation has run |
 | `similar_incidents` | `mcp:use` | `text` (cut to 500 characters), `limit=5` (1 to 10) | Resolved incidents that look similar and how they were resolved |
 | `search_runbooks` | `mcp:use` | `query` (cut to 300), `limit=3` (1 to 10) | Title, category, body |
+| `ask` | `incidents:read` (re-checked in the tool) | `question`, `conversation_id?` | The same loop as the Ask tab: `{conversation_id, answer, sources, unverified, grounded, warnings, steps, usage}`. Needs a chat account on the PagerLens server and spends that provider's credit; uses the default account; same rate limit; read-only. Only verified citations come back as `sources` |
 | `investigate` | `incidents:investigate` | `incident_id`, `use_memory=true`, `mode=rules`, `account?` | run id, hypotheses, report. AI modes need `account` (a chat account id or `env`) and spend that provider's credit |
 | `add_note` | `incidents:write` | `incident_id`, `note` | note id (author recorded as `mcp`) |
 | `mark_root_cause` | `incidents:write` | `incident_id`, `category`, `note?` | Resolves the incident and teaches the memory |
 
-The write tools re-validate the caller's own credential from the request headers inside the tool, so a read-only token or a viewer cannot write even through a client that offers the tool. Tool results contain log text collected from your services: treat it as untrusted data. Client snippets are in the README and on the Connect tab.
+The write tools (and `ask`, which spends model credit) re-validate the caller's own credential from the request headers inside the tool, so a read-only token or a viewer cannot write even through a client that offers the tool; an `ingest` token never reaches `ask`. Tool results contain log text collected from your services: treat it as untrusted data. Client snippets are in the README and on the Connect tab.
+
+### 9.1 Connect Claude Code to PagerLens and the fleet databases
+
+Goal: an external agent that answers with **real-time, environment-specific context**: PagerLens for incidents, evidence, runbooks and "ask", and AgentPG's database MCP for read-only SQL on each app's own database. Nothing below was run against the live fleet when this was written (see the end of this section).
+
+**1. PagerLens's own MCP (incidents, evidence, memory, `ask`).**
+
+```bash
+# a read-only token: Settings > API tokens > scope read (shown once)
+export PAGERLENS_TOKEN=<token>
+claude mcp add --transport http pagerlens https://<your-host>/mcp --header "Authorization: Bearer $PAGERLENS_TOKEN"
+```
+
+Then ask Claude Code: "Using pagerlens, why is checkout-api failing? Use the ask tool and tell me which citations were verified." The agent gets `list_incidents`, `get_incident`, `get_timeline`, `similar_incidents`, `search_runbooks` and `ask`; the write tools (`investigate`, `add_note`, `mark_root_cause`) refuse a `read` token. A `full` token also lets the agent investigate and record causes.
+
+**2. The fleet's databases, read-only, through AgentPG's MCP server (`ecoctl mcp`).** From the ecosystem checkout (see `ecosystem/docs/GUIDE.md`, section 7.10):
+
+```bash
+cd ecosystem
+.venv/bin/ecoctl mcp users pagerlens citypulse      # once per instance: the read-only database user ecoctl_ai (member of a1p_readonly)
+.venv/bin/ecoctl mcp check pagerlens                # handshake, select current_user (must be ecoctl_ai), and a CREATE TABLE that must be refused
+.venv/bin/ecoctl mcp claude pagerlens citypulse     # prints one `claude mcp add agentpg-<fleet>-<app> -- agentpg mcp serve --config ... --transport stdio` line per app
+.venv/bin/ecoctl mcp claude --project --write       # or merge the entries into ./.mcp.json (do not commit it: it holds a local path)
+```
+
+`ecoctl mcp config` writes the AgentPG config files into the git-ignored state directory (mode 0600; the entries name the file only, the credentials stay there). `ecoctl mcp serve --transport http` exists too and always sets a generated `A1P_JWT_SECRET`; stdio is the simple path for Claude Code. Each server is one app's database, so which database a tool talks to never depends on a header.
+
+**What the agent can see.** Through PagerLens's MCP: what the token's permissions allow (everything a `read` token sees: all services, log text, incidents; log text is untrusted data). Through AgentPG's MCP as `ecoctl_ai`: tables the app has not hidden. PagerLens's after-migrate hook (`hardening.py`) takes the base tables with free text away from `a1p_readonly` and gives it masked views instead (`incident_masked`, `log_event_masked`, `tuning_proposal_masked` and others), and denies the secret tables (settings, accounts, token hashes, sessions, the Lab's answer key); metrics, runs, observations, hypotheses, reports and runbooks stay readable so an agent can investigate. The other apps decide their own masking. `edb_stat_monitor` statement text is readable by that role. The hosted per-instance endpoint (`agentpg connect`, `agentpg token`) is **not** read-only (its session is read-write) and `ecoctl` never advertises it.
+
+**Not verified here:** no live call was made to the fleet, to `ecoctl`, to `agentpg` or to a hosted PagerLens when this section was written. The commands are taken from `ecoctl`'s documented behaviour; the field names of `agentpg connect --json`, the config keys of `agentpg mcp serve` and the claims AgentPG expects in an HTTP-mode JWT are marked unverified in the ecosystem guide. Test with `ecoctl mcp check` before relying on it. PagerLens's own MCP surface is tested in-process (`tests/test_ask_db.py`, `tests/test_domain_db.py`, `tests/test_federation_db.py`), including that `ask` needs `incidents:read` and that an `ingest` token is refused.
 
 ## 10. Getting data in
 
@@ -483,7 +577,7 @@ Permissions are what the code checks (`core.py`). Roles (people, from the identi
 | Permission | Allows |
 |---|---|
 | `dashboard:read` | Dashboard, services, fleet, stats, provider presets |
-| `incidents:read` | Incidents, hypotheses, evidence, telemetry, runs, observations, the Lab's scenario list |
+| `incidents:read` | Incidents, hypotheses, evidence, telemetry, runs, observations, the Lab's scenario list, and asking questions in Ask (it spends the default chat account's credit, rate limited) |
 | `runbooks:read` | Runbooks |
 | `incidents:investigate` | Run an investigation (AI modes spend provider credit); see chat accounts (id, name, model only) |
 | `incidents:write` | Notes, resolve, bulk resolve, record the root cause |
@@ -491,7 +585,8 @@ Permissions are what the code checks (`core.py`). Roles (people, from the identi
 | `simulator:run` | Trigger the Lab (administrators and `full` tokens only) |
 | `ingest:write` | Push telemetry and OTLP |
 | `metrics:scrape` | `/metrics` |
-| `settings:manage` | Provider accounts, embeddings, API tokens, vault, admin password, housekeeping settings |
+| `settings:manage` | Provider accounts, embeddings, API tokens, vault, admin password, housekeeping settings, database insights |
+| `tuning:manage` | See, scan, approve, reject and (when the server allows it) apply tuning proposals for PagerLens' own database (administrators and `full` tokens only) |
 | `mcp:use` | Use the MCP server |
 
 | Role or scope | Kind | Permissions |
@@ -518,7 +613,9 @@ The full model is in [SECURITY.md](../SECURITY.md). The points that matter when 
 - Provider keys are encrypted with Fernet under a random data key that the admin password wraps (and optionally `PAGERLENS_ENCRYPTION_KEY`). After a restart the vault is locked until the admin signs in or the platform secret unlocks it. Locked means HTTP 423 for features that need a stored key.
 - Outbound provider URLs are validated before every call (https; no embedded credentials; no loopback, private, link-local or carrier-grade-NAT addresses unless allowed; redirects never followed; responses size limited). The DNS-rebinding limitation noted in SECURITY.md applies.
 - The investigator and the model can only call eight registered read-only tools; tool results are fenced as `<untrusted_data>`, the model's answer is validated (known categories, observation ids that exist for this incident, text scrubbed again) and ungrounded claims are discounted. Log text is untrusted and can still mislead a model into a wrong opinion; a person decides.
-- **AI methods send log excerpts to the provider you choose.** Scrubbing at ingest is best effort.
+- **AI methods send log excerpts to the provider you choose.** Scrubbing at ingest is best effort. This includes Ask: whatever its read-only tools return for a question is sent to the chat account's provider.
+- Ask runs on a database connection opened READ ONLY, offers the model nine read-only tools, fences tool results as untrusted data, bounds rounds, tool calls, time, tokens and rate, keeps conversations in memory only (scrubbed, bounded, bound to the caller) and checks every citation against the database. Verification proves a record exists and was read, not that it supports the claim.
+- Tuning changes only PagerLens' own database, only after a person approved it, only when `PAGERLENS_ALLOW_TUNING_APPLY=true` (off by default), only through the allow-list parser, one statement at a time with timeouts, and every step is in `tuning_audit`. PagerLens never changes a monitored system and never applies a server setting.
 - Data is single-tenant: anyone with `read` access sees every service, log line and incident.
 - The UI is served with a strict Content-Security-Policy, `X-Frame-Options: DENY`, `nosniff` and `no-referrer`. TLS is not terminated by the app.
 - Do not commit `.env`, tokens or keys. The repository ignores `.env`, `.env.*` (except `.env.example`), `api_key` and `*.key`. Stage explicit paths when committing.
@@ -574,6 +671,12 @@ Free-tier AgentPG sandboxes can auto-pause when idle. A paused sandbox answers a
 | 429 on login or setup | More than 10 failures a minute from one address | Wait a minute |
 | Ingest 422 | Name, timestamp or batch rules | Check names (lowercase), timestamps within the window, 1 to 1000 items |
 | No incident from my alert | Alert joined an open incident with the same fingerprint within 3 hours | Check the existing incident; this is by design |
+| Ask answers "no chat account is configured" (422) | Neither the environment (`LLM_BASE_URL`, `LLM_CHAT_MODEL`) nor Settings has an account with a chat model | Add one (Settings > Provider accounts); for a demo run `scripts/fake_llm.py` and set the environment as in section 14 |
+| Ask answers 423 | The stored account's key is locked after a restart | Sign in as the administrator (or set `PAGERLENS_ENCRYPTION_KEY`) |
+| Ask answers 429 | Rate limit (`PAGERLENS_ASK_PER_MINUTE`, `PAGERLENS_ASK_GLOBAL_PER_MINUTE`) | Wait a minute or raise the limit |
+| An answer contains `UNVERIFIED` | The model cited an incident, evidence or runbook that does not exist or that it never read | Treat that claim as unchecked; ask again or open the evidence yourself |
+| Tuning: Apply is greyed out, or 403 | `PAGERLENS_ALLOW_TUNING_APPLY` is not true (the default) | Set it only on an instance where an administrator should be able to create indexes |
+| Tuning: "Look for improvements" finds nothing | The kit's advisor and tuner are not available (no EDB extensions) or nothing is slow | Read the notes the scan returns; the Database tab says what is missing |
 | Dashboard full of old incidents | Services that went away | Auto-resolve (default 30 minutes), bulk resolve, or retire the service |
 | A service shows "No data" | No metric point newer than `stale_after_minutes` | Check the sender; or retire the service |
 | Embeddings missing, recall empty | Provider failed at ingest or size mismatch | `pagerlens reembed` or restart; text search still works |
@@ -589,13 +692,15 @@ set -a; . ./.env; set +a; make test-db       # recreates database pagerlens_test
 
 `make test-db` runs `DROP DATABASE IF EXISTS pagerlens_test` and `CREATE DATABASE pagerlens_test` inside the compose database, then `pytest -q` with `TEST_DATABASE_URL` pointing to it (127.0.0.1:5433). Tests marked as database tests skip when `TEST_DATABASE_URL` is unset. `tests/conftest.py` shares one `TestClient` for the process, disables the housekeeping thread (`PAGERLENS_HOUSEKEEPING=false`), and resets the embedding config and the vault around every test. CI (`.github/workflows/build-image.yml`) runs ruff and the full test suite against a `pgvector/pgvector:pg17` service, then builds and publishes `ghcr.io/<owner>/<repo>` (`latest`, `sha-*`, version tags) from `main`, with a nightly rebuild.
 
-What the tests cover (by file): ingest, domain, scrubbing, authentication and tokens, federation, accounts and the vault, the LLM and hybrid investigators against a scripted stand-in provider, housekeeping (auto-resolve, bulk resolve, retire), the dashboard verdicts, embedding reconciliation, OTLP, the pull agent, password and network guards, and the front-end typing behaviour (Node scripts under `tests/ui/`, run through `tests/test_ui_js.py`). The AI methods have been exercised only against the scripted stand-in (see section 16).
+What the tests cover (by file): Ask (`test_ask_db.py`: the tool loop, citation verification including hallucinated and unread citations, prompt injection through log text, permissions, the rate limit, the bounds, conversations, the MCP tool, the demo stand-in through the real tools), tuning (`test_tuning_parser.py`: the allow-list against about a hundred statements; `test_tuning_db.py`: proposals, decisions, apply off by default, audit, before and after, timeouts, one at a time), ingest, domain, scrubbing, authentication and tokens, federation, accounts and the vault, the LLM and hybrid investigators against a scripted stand-in provider, housekeeping (auto-resolve, bulk resolve, retire), the dashboard verdicts, embedding reconciliation, OTLP, the pull agent, password and network guards, and the front-end typing behaviour (Node scripts under `tests/ui/`, run through `tests/test_ui_js.py`, including `ask_tab.mjs` and `tuning_tab.mjs`). The AI methods have been exercised only against the scripted stand-in (see section 16).
 
 Demo stand-in model: `scripts/fake_llm.py` is a tiny OpenAI-compatible server (standard library only, loopback only, deterministic, clearly labelled as not a model) for trying the AI methods and for recording the tutorial video without a provider key: `python scripts/fake_llm.py --port 8099`, then start PagerLens with `LLM_BASE_URL=http://127.0.0.1:8099/v1 LLM_API_KEY=demo LLM_CHAT_MODEL=demo-chat EMBEDDING_MODEL=demo-embed`. It asks for the read-only tools on the alerting service, then answers from a fixed keyword table over their results, citing the observation ids it saw; its embeddings are lexical hashes. It proves the plumbing, not model quality.
 
+The stand-in also answers **Ask** (when the request offers the Ask tools), for exactly three questions, deterministically and by really calling the tools: "Why is checkout-api failing?" (`list_incidents`, `get_incident`, `get_evidence`, `search_runbooks`), "Have we seen this before?" (`list_incidents`, `get_incident`, `similar_incidents`) and "What is slow in the database?" (`database_health`, `list_services`, `list_incidents`, then `slow_queries` per service). Its wording is a template filled from the tool results and says so ("DEMO STAND-IN ... not reasoning"); any other question gets a line saying it only knows those three. The `[incident #N]`, `[evidence #N]` and `[runbook #N]` markers in its answers are real, so the server's check passes for a reason. Setup for the first question: `pagerlens simulate bad_deploy` then investigate it (Rules); for the second, resolve an earlier incident with a cause first; for the third, the `slow_query` Lab scenario.
+
 Evaluation: `pagerlens eval` replays the ten scenarios cold and warm and prints top-1 and top-3 accuracy. `pagerlens eval --mode hybrid --account env` does it with a model (20 investigations, spends credit) and prints token use. It resets the demo telemetry and deletes the incidents it created. Use `env` for the CLI: accounts stored in the web app are locked outside the browser.
 
-Code layout and conventions: ruff with line length 100 and rules `E,F,I,B,UP`; package at `src/pagerlens`; static front end without inline script or style (CSP); version is `__version__ = "0.1.0"`. CLI commands: `migrate`, `seed`, `simulate [scenario]`, `investigate <id> [--no-memory] [--mode rules|llm|hybrid] [--account id|env]`, `eval`, `reembed`, `serve`, `start`, `reset-admin`; plus the separate `pagerlens-agent run|once`.
+Code layout and conventions: ruff with line length 100 and rules `E,F,I,B,UP`; package at `src/pagerlens`; static front end without inline script or style (CSP); version is `__version__ = "0.1.0"`. CLI commands: `migrate`, `seed`, `simulate [scenario]`, `tuning scan|list`, `investigate <id> [--no-memory] [--mode rules|llm|hybrid] [--account id|env]`, `eval`, `reembed`, `serve`, `start`, `reset-admin`; plus the separate `pagerlens-agent run|once`.
 
 ## 15. AIDB and AgentPG integration
 
@@ -650,4 +755,30 @@ Limitations found in the code or stated by it:
 - **No retention job** for telemetry, no scheduled collector for real platforms, no long-term telemetry storage (README roadmap).
 - **PayBroker and ShopFront** have no direct integration with PagerLens in their source or the manifest; they can only be monitored through the agent.
 - **Not verified in this documentation pass:** the exact `ecoctl apply` flags for a single app (use `ecoctl apply --help`), live fleet behavior and URLs (deliberately not contacted), the rotation procedure for `PAGERLENS_ENCRYPTION_KEY`, restoring a backup across different platform secrets, and the ordering of hypotheses for any single scenario on a fresh database (only the aggregate top-3 result is documented in the README).
+- **Ask has only run against scripted stand-ins** (the tests and `scripts/fake_llm.py`), never a live model: answer quality, tool choice and citation discipline of real models are unmeasured. Citation verification proves existence and that the record was read, not relevance. Conversations are in memory per process (a restart or another replica forgets them; the tab then re-sends its last six turns), and the rate limit is per process. `database_health` shows "not available" on a database without the EDB extensions.
+- **Tuning has not run against a live `query_advisor` or `edb_pg_tuner`**; the apply path and the before/after were exercised on a local PostgreSQL 17. The before/after is an EXPLAIN of estimated cost, not a measured time, and exists only when the motivating statement is a single `SELECT` that the kit did not cut at 300 characters. A failed `CREATE INDEX CONCURRENTLY` can leave an invalid index to drop by hand. Proposals for monitored apps are text only.
+- **No self-healing orchestration** (section 17).
 - The ecosystem README shows `embed_dimensions: 768` in its documentation example while `ecosystem.yaml` currently sets `1536`. The manifest governs; PagerLens' own default is 768.
+
+## 17. Chat, agents, tuning and self-healing: what is built and what is not
+
+Three wishes were made for PagerLens. Here is what each one is today, without rounding up.
+
+| Wish | Built | Not built |
+|---|---|---|
+| Built-in GenAI chatbot for natural-language diagnostics and faster incident resolution | **Ask** (section 7.10): a conversation over read-only tools with server-verified citations, in the web app and as the MCP tool `ask`. The AI investigation methods (Rules + AI, AI only) existed before | Real-model accuracy numbers; actions from chat (it only reads); memory across restarts |
+| Autonomous agents for self-healing orchestration and proactive performance tuning | **Proactive tuning in its safe form** (section 7.11): scheduled and on-demand proposals for PagerLens' own database, human approval, audited apply behind an off-by-default switch, EXPLAIN before and after. `pagerlens-agent` collects and alerts; the investigator runs on an alert (`"investigate": true`) | **Self-healing orchestration is not built** (below). Nothing acts on a monitored system |
+| MCP integration so agents get real-time, environment-specific context | PagerLens's MCP (ten tools including `ask`) and the recipe in section 9.1 for AgentPG's read-only database MCP through `ecoctl mcp`; the masked views bound what an agent can read | Live verification of the fleet recipe; OAuth for web connector UIs |
+
+**Why self-healing orchestration is not built.** Two reasons, one of principle and one of platform:
+
+- *Principle.* PagerLens never changes a monitored system. Its safety story (read-only tools, a model that cannot act, reports that tell a person what to do) rests on it, and the approve-and-apply path of section 7.11 is deliberately limited to PagerLens' own database.
+- *Platform.* Restarting or resuming a sandbox needs the AgentPG CLI (`agentpg sandbox resume`, `pause`, `console`), and the CLI has no non-interactive sign-in: `agentpg login` is browser-only, and platform keys (`platform-keys create`) exist but the CLI has no documented flag or environment variable that uses one (ecosystem capabilities note, sections 8 and 9). A process running PagerLens in a sandbox has no credential it could use to act on its peers, and giving it one would also give it the power to pause everything. Whether the CLI can change a sandbox's compute plan (scale) was not verified; the documented `sandbox create` options cover the plan only at creation.
+
+**What it would take.** (1) Platform API keys that tooling can use (an `AGENTPG_API_KEY` or an equivalent flag), ideally scoped to one sandbox and to the verbs restart and resume. (2) A runbook step that is *machine-readable* (for example "resume sandbox X") and shown to an operator as a button with the exact command. (3) That operator's approval, recorded in an audit table like `tuning_audit`, before PagerLens runs it, with a timeout, a dry-run output and a post-check that the service came back. (4) Keeping the Rules and AI methods advisory: they would propose the step, a person would approve it. This is the same propose, approve, apply, audit shape as section 7.11 extended to a platform action; none of it exists yet.
+
+**Signature moments for a demo** (reproducible with the stand-in model; not recorded in this change):
+
+1. *Ask in plain English and watch a verified answer.* Break checkout in the Lab, investigate with Rules, open **Ask**, press "Why is checkout-api failing?": the typing state, then an answer with chips for the incident, the evidence and the runbook, each verified against the database. A second take shows an answer with an invented citation marked `UNVERIFIED` (use a scripted model or a real one that slips).
+2. *Approve a proposed index and see before and after.* With `PAGERLENS_ALLOW_TUNING_APPLY=true` on a throwaway instance, **Look for improvements** (or a proposal prepared in advance when the advisor has nothing to say), approve with a note, apply, and read the EXPLAIN table: `Seq Scan` before, an index scan after, with the cost that fell.
+3. *The fleet in your editor.* `ecoctl mcp claude`, then Claude Code asks `ask` about an incident and reads the fleet's databases read-only (section 9.1).

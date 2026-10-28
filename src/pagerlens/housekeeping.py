@@ -9,6 +9,7 @@ Two settings, stored like the other instance settings (app_setting), changed in 
 """
 import contextlib
 import logging
+import os
 import threading
 from datetime import UTC, datetime, timedelta
 
@@ -148,6 +149,13 @@ def auto_resolve_pass(conn, now: datetime | None = None) -> list[int]:
     return resolved
 
 
+def tuning_scan_minutes() -> float:
+    try:
+        return max(0.0, float(os.environ.get("PAGERLENS_TUNING_SCAN_MINUTES", "60")))
+    except ValueError:
+        return 60.0
+
+
 _stop = threading.Event()
 _thread: threading.Thread | None = None
 
@@ -164,6 +172,15 @@ def _loop() -> None:
                 log.info("auto-resolved %d recovered incident(s): %s", len(done), ", ".join(f"#{i}" for i in done))
         except Exception as exc:  # noqa: BLE001 - the database may be asleep or mid-migration; try again next minute
             log.warning("housekeeping pass failed: %s", str(exc)[:200])
+        try:    # the tuning job: new PROPOSALS only (it changes nothing); PAGERLENS_TUNING_SCAN_MINUTES=0 turns it off
+            from . import tuning
+
+            with connect(retries=1) as conn:
+                found = tuning.scan_if_due(conn, tuning_scan_minutes())
+            if found and found["created"]:
+                log.info("tuning scan: %d new proposal(s)", len(found["created"]))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("tuning scan failed: %s", str(exc)[:200])
 
 
 def start_background() -> bool:

@@ -1,207 +1,181 @@
 ## 1 af_bella
-When an alert wakes you up, the hard part is not the alert.
+It is three in the morning. Checkout is failing.
 
-It is finding out why.
+Your logs are in one tool, your metrics in another, and your runbooks in a wiki.
 
-This is PagerLens. It looks at what changed, and what broke. It ranks the possible causes, and shows the evidence for each one.
+You need the likely cause in minutes. And you want the next incident to learn from this one.
 
 ...
 
-It never changes your systems. It only reads.
+Here is how Postgres on AgentPG does that.
 
-It runs on plain Postgres, with the pgvector extension. So there is no extra database to run.
+## 2 am_michael
+Who is who? PagerLens is the sample app.
 
-## 2 af_bella
-This is a fictional online shop, with five services.
+Three things around it are scaffolding you can swap: sign-in, the model gateway, and the secret vault.
 
-Each card shows whether a service is healthy, its recent metrics, and what it depends on.
+Sign-in works with any standard OpenID Connect provider, as long as it sends the roles our apps expect.
 
-Look at checkout-api. It depends on payments-gateway and inventory-api.
+The gateway is any OpenAI-compatible endpoint.
 
-That map matters later. It helps PagerLens tell a victim from a cause.
+The vault is one small module of the shared kit. Its key comes from the platform, so you replace it through the kit, not through a setting.
 
-Everything here arrived through the same ingest interface that your own services would use.
+The platform part is Postgres on AgentPG, with its extensions.
 
-The page refreshes every ten seconds.
+## 3 af_heart
+Now the problem itself. This is the Lab, a simulator. It can break a fictional shop in ten ways.
 
-## 3 am_michael
-Now let's break something.
+I pick a bad release, and press Break it.
 
-This is the Lab, a simulator. It can break the shop in ten ways.
+An alert fires for the checkout error rate. Now I ask why.
 
-A bad release. An exhausted database pool. A memory leak. And some deliberately confusing mixes.
-
-The simulator writes realistic logs, metrics and deploys, and fires an alert.
-
-It also keeps the true cause hidden, so we can check our answer later.
-
-I will pick the bad release.
-
-It replaces the demo data, and keeps past incidents.
-
-Here is the new incident.
-
-## 4 am_michael
-The alert says the checkout error rate is above five percent.
-
-I will investigate it with the Rules method.
-
-Rules means no model, and no cost. It is a fixed investigator, and you can read its logic.
-
-Let's run it.
+I use the Rules method. That is a fixed investigator, with no model and no cost.
 
 [pause 1.5]
 
-That took seconds.
+Done, in seconds. It asked read-only questions about checkout, and what it depends on.
 
-It asked read-only questions about checkout, and everything it depends on.
+Metrics against a baseline. Grouped errors. Recent deploys. And slow queries.
 
-Metrics, compared to a baseline. Grouped error messages. And recent deploys.
+Every step is recorded in the run viewer. The answer is a ranked list of causes.
 
-Every query is capped, and every step is recorded.
+## 4 am_eric
+Why trust the top answer?
 
-The result is a ranked list of hypotheses, each with a score.
+It says a release was deployed just before the errors began.
 
-## 5 af_heart
-Let's see why PagerLens trusts its top answer.
+Every line is evidence, and it either supports the answer or refutes it.
 
-The top hypothesis is a release, deployed just before the errors began.
+Open one, and you see the raw observation behind it.
 
-But it is not just a claim.
+Here, a new error signature appeared only after the deploy.
 
-Every line says whether an observation supports it, or refutes it.
+Log text is untrusted. PagerLens shows it, and never obeys it.
 
-Open an evidence link, and you see the raw data behind it.
+Below is the report, in Markdown, ready for a ticket. The runbook steps are only suggestions. PagerLens cannot restart or roll back anything.
 
-Here, a new error signature first appeared after the deploy, not before.
+## 5 af_sarah
+Now the same incident, with a language model.
 
-The log text is untrusted. PagerLens shows it, and never obeys it.
+The method is Rules plus AI. The model drives the same read-only tools.
 
-It also checks the opposite. An unrelated deploy, or heavy load, subtracts from a hypothesis.
+Today the model is a stand-in that ships with the repository. It is not a real model.
 
-## 6 af_heart
-Next, the report.
+So no key is needed, and the screens read the same as with a real one.
 
-It is Markdown, ready to paste into Slack or a ticket.
+[pause 2.5]
 
-It holds the most likely cause, and a timeline.
+Each model turn shows up in the run viewer, between the tool calls.
 
-Copy it with one click.
+Both answers blame the release, so confidence goes up. Anything the model claims is checked against real evidence.
 
-Below it, the run viewer lists every step the investigator took, in order.
+We have not measured accuracy on live models.
 
-The runbook steps are suggestions for a person.
+## 6 am_adam
+Now, the next incident should learn from this one.
 
-PagerLens has no tool that restarts, rolls back, or edits anything.
+I confirm the real cause, a bad deploy, and add a note.
 
-## 7 am_eric
-PagerLens has two more investigation methods, and both use a language model.
-
-The first is AI. A model drives the same read-only tools.
-
-The second is Rules plus AI. It runs both, and reconciles them.
-
-When they agree, confidence goes up.
-
-When only the model believes something, its confidence is capped.
-
-And anything the model claims is checked against real evidence.
-
-The model has no tool that changes anything.
-
-To use a model, you add a provider account in settings.
-
-Keys are stored encrypted, and never shown again.
-
-One warning. Log excerpts do leave your server for these methods. So choose your provider with care.
-
-We have not measured accuracy on live models yet.
-
-## 8 am_eric
-Now the same incident, investigated with Rules plus AI.
-
-I choose an account.
-
-This one is a stand-in model that ships with the repository. So no provider key is needed.
-
-It is not a real model. With a real one, the screens read the same. Only the wording and reasoning differ.
-
-I press Investigate. The model will ask for the same read-only tools, one after another.
-
-[pause 3.0]
-
-Done. Each of the model's turns shows up in the run viewer, between the tool calls.
-
-Then the two results are reconciled.
-
-The rules and the model both blame the release. So confidence goes up.
-
-And the evidence the model cites is checked against what really exists.
-
-## 9 af_sarah
-Now the part that makes PagerLens improve over time.
-
-I tell it the real cause, a bad deploy, and add a short note.
-
-The incident is stored as a vector in Postgres, together with its error signatures.
-
-The simulator can reveal its hidden answer. It confirms we were right.
+PagerLens stores this incident as a vector in Postgres.
 
 Now I break the same thing again, and investigate.
 
 [pause 6.0]
 
-The new report lists the earlier incident, and the cause it was confirmed as.
+The new report lists the earlier incident, and the cause a person confirmed.
 
-Memory only comes from causes a person confirms. Nothing is learned from guesses.
+Nothing is learned from guesses. How does that lookup work?
 
-## 10 af_sarah
-Your own services can connect the same way.
+## 7 af_bella
+Under the hood. This is the memory lookup, as plain sequel.
 
-Create an ingest token in settings. It can push data, and read nothing.
+It sorts resolved incidents by cosine distance, with the pgvector operator.
 
-Then post logs, metrics, deploys and alerts.
+An HNSW index serves that ordering. These are the real index definitions from this database.
 
-OpenTelemetry works too. A small pull agent can probe health endpoints, and scrape Prometheus metrics.
+Here is a real query plan. This table is tiny, so I turn off sequential scans, to show the index can serve it.
 
-Every log line is scrubbed of emails, addresses and secrets before it is stored.
+And here is the real lookup for our new incident. The earlier one comes back, with its similarity.
 
-Here is one alert, posted with curl.
+Runbooks use a hybrid search. One query runs full-text search and vector search, and fuses both rankings.
 
-[pause 4.0]
+Here is the real result, for the question: checkout errors after a release.
 
-The reply says a new incident was opened.
+## 8 am_michael
+Next, live updates. The incident list should change by itself.
 
-And there it is, in the incident list.
+The tcn extension makes Postgres send a notification whenever an incident or an alert changes.
+
+Here I listen to that channel in psql.
+
+Now I send an alert, the way any service would, with curl.
+
+[pause 2.0]
+
+Two notifications arrive, one for the incident and one for the alert.
+
+The payload is only a table and a row number. Never row contents.
+
+The app holds one listening connection, and pushes those events to the browser.
+
+Watch the list. I send an alert for another service.
+
+The new incident appears by itself.
+
+## 9 af_heart
+Now a quieter failure. No deploy, no outage. One query got slower.
+
+Every app on the kit exports a gauge of its slowest statements. On AgentPG it comes from edb_stat_monitor.
+
+On this local Postgres it comes from pg_stat_statements. This is the real gauge.
+
+PagerLens's agent scrapes it. When a statement gets three times slower than its history, it opens a slow query alert.
+
+The Lab scenario writes the points that the agent would have pushed. I break it, and investigate.
+
+The top cause is a query that became forty times slower.
+
+The evidence names the query, with its mean before and now.
+
+The statement text itself is in the Database tab, under that query id.
+
+## 10 am_eric
+Now, who may read this data? An assistant should see incidents, but not personal data or secrets.
+
+On AgentPG, a read-only user comes from one command. It is a member of a read-only group role. Locally, I created a role set up the same way.
+
+As the owner, a note holds an email address.
+
+As the read-only role, the masked view shows a placeholder instead.
+
+The base table is denied. A write is denied too.
+
+And the tables with secrets, like token hashes, are denied, with no view at all.
+
+Postgres enforces this, not the application code.
 
 ## 11 af_sarah
-You can also ask from your editor.
+One more place to look: the Database tab.
 
-PagerLens speaks MCP, a standard way for assistants to call tools.
+On this local Postgres it shows only pg_stat_statements, the top statements.
 
-Claude Code, VS Code and Cursor can all connect.
+On AgentPG, the same page also shows edb_stat_monitor, edb_pg_tuner where installed, and query_advisor.
 
-Here are real calls, made with a read-only token.
+I cannot show that page here. This is real output, captured from our live AgentPG fleet, not run now.
 
-It can list incidents, and read the evidence.
+PagerLens's instance has edb_stat_monitor, query_advisor, tcn and pgvector installed.
 
-But a read-only token can look, and never write.
+And query_advisor already suggests an index for the alert table.
 
-In the wider ecosystem, CityPulse reports to PagerLens automatically.
+It only suggests. Nothing is changed.
 
-People sign in through a shared identity provider.
+## 12 am_adam
+Try it yourself. Three commands: migrate, seed, serve.
 
-## 12 af_sarah
-To recap.
+Then open the Lab, and press Break it.
 
-PagerLens collects telemetry in Postgres. It ranks causes, with evidence you can open.
+The guide is in the docs folder. Section fifteen lists every EDB and AgentPG capability this app uses.
 
-It keeps humans in charge, and it learns from the causes you confirm.
+Next, try the slow query scenario, and the Database tab.
 
-To try it, clone the repository, and start the database with docker compose.
-
-Then run migrate, seed and serve, and press Break it in the Lab.
-
-The guide covers installation, configuration and operations.
-
-Thanks for watching.
+The end card repeats the legend: platform, scaffolding, sample app. Thanks for watching.

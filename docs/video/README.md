@@ -1,13 +1,19 @@
-# PagerLens tutorial video: build
+# PagerLens customer video (problem first): build
 
-One command builds the review cut of the tutorial video (narrated, captioned mp4) from `docs/VIDEO-SCRIPT.md` and the recorder
+One command builds the review cut of the customer video (narrated, captioned mp4, about 7 and a half minutes) from `docs/VIDEO-SCRIPT.md` and the recorder
 `record.spec.ts`:
 
 ```bash
-docs/video/build.sh          # about 8 minutes; writes docs/video/out/pagerlens.mp4 and pagerlens.srt (git-ignored)
+docs/video/build.sh          # about 12 minutes (2 of speech synthesis, 8 of recording); writes docs/video/out/pagerlens.mp4 and pagerlens.srt (git-ignored)
 ```
 
-Everything is local: a throwaway Postgres (initdb, no Docker), the demo stand-in model `scripts/fake_llm.py`, PagerLens, the
+The video starts from the customer's problem (a 3 a.m. incident), shows who is platform (Postgres on AgentPG), swappable scaffolding
+(sign-in, model gateway, vault) and sample app, runs the core investigation, then goes UNDER THE HOOD with real database-level output
+(pgvector and the HNSW index, the hybrid runbook search, `tcn` live updates, the slow query finding, database-enforced masking, the
+Database tab) and ends with the three commands to try. See `docs/VIDEO-SCRIPT.md` for the scene table and the honesty rules (what is
+a real run, what is a labelled capture from the live AgentPG fleet, what is the stand-in model).
+
+Everything is local: a throwaway Postgres (initdb, no Docker; needs `vector`, `pg_trgm`, `tcn` and `pg_stat_statements`), the demo stand-in model `scripts/fake_llm.py`, PagerLens, the
 recorder in real Google Chrome, Kokoro (local neural text to speech) and ffmpeg. Nothing is downloaded and no real credential is involved (the admin
 password is random per run and never shown).
 
@@ -20,8 +26,10 @@ password is random per run and never shown).
    The audio is reused when `narration.txt` and `pronounce.json` have not changed (`FORCE_TTS=1` speaks it again).
 2. A private Playwright browsers directory under `$WORK` makes Playwright's video recorder use your ffmpeg (`FFMPEG`, default the
    one on PATH) instead of its own build; `npx playwright install` is not needed.
-3. `stack.sh start`: fresh Postgres cluster (vector and pg_trgm), `migrate`, `seed`, stand-in model, `pagerlens serve`, on
-   loopback ports `BASE_PORT+1` to `+3` (default 41401 to 41403). A fresh database for every build.
+3. `stack.sh start`: fresh Postgres cluster (vector, pg_trgm, pg_stat_statements preloaded; tcn comes with the migration), a local stand-in
+   for AgentPG's read-only role (group role `a1p_readonly` with default SELECT on new tables, and the login role `pl_reader` in it),
+   `migrate` (which applies `hardening.py`), `seed`, stand-in model, `pagerlens serve`, on
+   loopback ports `BASE_PORT+1` to `+3` (default 41401 to 41403; the terminal cards run real `psql` against that Postgres). A fresh database for every build.
 4. `record.spec.ts` (1920x1080, full pace, `PACE=1`): every scene is held for its narration plus 1.2 s, and the actions inside a
    scene are anchored to the sentence they illustrate (`b.at('text of the sentence')`; a sentence that is not in `narration.txt`
    fails the run, so the two cannot drift apart). Long sentences get gentle scrolling so no picture sits still. It writes `pagerlens-tutorial.webm` and `scenes.json` (scene start times).
@@ -36,7 +44,7 @@ password is random per run and never shown).
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PG_BIN` | on PATH | directory with `initdb`, `pg_ctl`, `psql` of a Postgres with the `vector` and `pg_trgm` extensions |
+| `PG_BIN` | on PATH | directory with `initdb`, `pg_ctl`, `psql` of a Postgres with the `vector`, `pg_trgm`, `tcn` and `pg_stat_statements` extensions |
 | `WORK` | `docs/video/out/work` | scratch (database, audio, logs) |
 | `OUT_DIR` | `docs/video/out` | output folder |
 | `NAME` | `pagerlens` | output base name |
@@ -44,6 +52,7 @@ password is random per run and never shown).
 | `DELIVER_DIR` | unset | also copy the mp4 and srt there |
 | `PACE` | `1` | recorder pace; below 1 is for rehearsals only (the checks then fail on purpose) |
 | `TTS_DIR` | `../../../videos/tts` from the project | folder with `narrate.py`, its `.venv` and the Kokoro models |
+| `CAPTURES_DIR` | `../../../videos/live-captures` from the project | real captures from the live AgentPG fleet (`extensions-installed.txt`, `ecoctl-insights.txt`), shown in scene 11 as labelled captures |
 | `FORCE_TTS` | unset | speak the narration again even if unchanged |
 | `FFMPEG` | `ffmpeg` on PATH | ffmpeg binary for Playwright's recorder |
 
@@ -57,5 +66,7 @@ scene starts late ("beat N is X s late"); lower that scene's factor. `narration.
 `pronounce.json` holds project respellings merged over the shared `videos/tts/pronounce.json` (captions keep the written form).
 Edit them, run `build.sh` again.
 
-Scene 11's editor segment is a drawn terminal card with real MCP calls (see section 4 of the script), not a capture of an
-assistant's window. The narration is synthetic (review quality); replace it with a human voice for release.
+The terminal cards are drawn by the recorder: the ones in scenes 7 to 10 show real `psql` runs and real calls to the running app (the
+SQL of the app's own queries is copied from `src/pagerlens/retrieval.py` and marked abridged); the two amber cards in scene 11 are
+real captures from the live fleet, labelled "CAPTURED ... not run now". The Lab now has ten scenarios and every Rules run has a
+`slow_queries` step; scene 3 shows it. The narration is synthetic (review quality); replace it with a human voice for release.

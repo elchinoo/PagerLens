@@ -1,38 +1,30 @@
 import { test, expect, Page, Locator, Browser } from '@playwright/test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { spawn, spawnSync } from 'node:child_process';
+import * as os from 'node:os';
 
 /**
- * Records the on-screen part of the PagerLens tutorial video (docs/VIDEO-SCRIPT.md, scenes 1 to 12) with Playwright video.
+ * Records the on-screen part of the PagerLens customer video (docs/VIDEO-SCRIPT.md, scenes 1 to 12) with Playwright video.
  *
- *   1920x1080, light theme, slow human pacing (moving cursor, smooth scrolling, typed text), visible callout
- *   highlights and the lower-thirds from the script's callout column. Output (git-ignored): docs/video/out/.
+ * Problem first: a 3 a.m. incident, who-is-who (platform, scaffolding, sample app), the core investigation, then UNDER THE HOOD:
+ * the real SQL of incident memory and runbook search, live updates with tcn, the slow query finding, database-enforced masking and
+ * the Database insights tab with REAL output captured from the live AgentPG fleet (labelled as captured, never run here).
  *
- * It does NOT start anything. Start the stack first (VIDEO-SCRIPT.md section 1): a fresh PagerLens database, `pagerlens
- * seed`, and `pagerlens serve` with the demo stand-in model, which scene 8 needs:
- *
- *   python scripts/fake_llm.py --port 8099 &      # DEMO STAND-IN, not a real model
- *   LLM_BASE_URL=http://127.0.0.1:8099/v1 LLM_API_KEY=demo LLM_CHAT_MODEL=demo-chat EMBEDDING_MODEL=demo-embed \
- *     pagerlens serve 2> /tmp/pagerlens-recording.log
- *
- * Then, from docs/video (once: `npm install`; the Chrome channel needs Google Chrome installed):
- *
- *   ADMIN_PASSWORD='<throwaway, 12+ characters>' npx playwright test            # reads the setup code from the log
+ *   1920x1080, light theme, human pacing (moving cursor, smooth scrolling, typed text), callouts and lower-thirds. Output
+ *   (git-ignored): docs/video/out/. Use docs/video/build.sh, which starts the whole stack (stack.sh) and the narration.
  *
  * Environment (nothing secret is stored in this file; secrets stay in the Playwright process):
  *   PAGERLENS_URL   default http://localhost:8000
- *   ADMIN_PASSWORD  required. Throwaway, chosen by you. Used off camera (first-run setup and sign-in happen before the
- *                   recording context exists, so no password or token is ever on screen).
- *   SETUP_CODE      the first-run code, or
- *   SETUP_LOG       path of the server's stderr log (default /tmp/pagerlens-recording.log), polled for the code.
- *                   Neither is needed when the app is already set up (the password is then used to sign in).
- *   PACE            pause multiplier, default 1 (slow). Use 0.2 for a quick rehearsal.
- *   HEADED=1        show the browser.
+ *   ADMIN_PASSWORD  required, throwaway, used off camera (setup and sign-in happen before the recording context exists)
+ *   SETUP_CODE / SETUP_LOG   the first-run code, or the server's stderr log to read it from
+ *   PSQL_BIN, PG_PORT        psql and the port of the local throwaway Postgres (the terminal cards run REAL psql against it)
+ *   CAPTURES_DIR    folder with the real captures from the live AgentPG fleet (extensions-installed.txt, ecoctl-insights.txt)
+ *   PACE            pause multiplier, default 1. HEADED=1 shows the browser.
  *
- * The recorder also asserts what the narration claims: the top hypothesis of the Rules investigation is the bad deploy,
- * the AI investigation agrees with it, and the second report lists the first incident under "Similar past incidents".
- * Terminal scenes are drawn as an in-page terminal card: scene 10 performs a real POST /api/ingest/alerts, scene 11 real MCP
- * calls (initialize, tools/call) against /mcp with the read-only `editor` token; scene 12 shows the quick-start commands as text.
+ * The recorder asserts what the narration claims: the Rules top hypothesis is the bad deploy, the AI run agrees, the second
+ * report lists the first incident, the pgvector plan and lookups are real, the tcn notifications arrive and the list updates by
+ * itself, the slow query evidence line appears, the read-only role is masked and denied, and the captures are present.
  */
 
 const BASE = (process.env.PAGERLENS_URL || 'http://localhost:8000').replace(/\/$/, '');
@@ -133,15 +125,15 @@ function installOverlay() {
       bar.className = '__rec_lower';
       root().appendChild(bar);
     },
-    term(open: boolean, label = 'Terminal', note = 'the request below is real: it runs against this local server') {
+    term(open: boolean, label = 'Terminal', note = 'the request below is real: it runs against this local server', accent = '#3fb950', font = 26) {
       root().querySelectorAll('.__rec_term').forEach((n) => n.remove());
       if (!open) return;
-      const box = el('div', { position: 'fixed', left: '160px', right: '160px', top: '170px', bottom: '170px', background: '#0d1117', color: '#e6edf3',
+      const box = el('div', { position: 'fixed', left: '110px', right: '110px', top: '120px', bottom: '120px', background: '#0d1117', color: '#e6edf3',
         borderRadius: '14px', boxShadow: '0 20px 60px rgba(0,0,0,.55)', border: '1px solid #30363d', display: 'flex', flexDirection: 'column' });
       box.className = '__rec_term';
-      const bar = el('div', { padding: '12px 18px', background: '#161b22', color: '#8b949e', font: '600 20px system-ui, sans-serif',
-        borderRadius: '14px 14px 0 0' }, label + '  (' + note + ')');
-      const pre = el('pre', { margin: '0', padding: '26px 30px', font: '26px/1.5 ui-monospace, Menlo, monospace', whiteSpace: 'pre-wrap',
+      const bar = el('div', { padding: '12px 18px', background: '#161b22', color: accent, font: '700 22px system-ui, sans-serif',
+        borderRadius: '14px 14px 0 0', borderBottom: '3px solid ' + accent }, label + '   |   ' + note);
+      const pre = el('pre', { margin: '0', padding: '26px 30px', font: font + 'px/1.5 ui-monospace, Menlo, monospace', whiteSpace: 'pre-wrap',
         wordBreak: 'break-all', overflow: 'hidden', flex: '1' });
       pre.id = '__rec_term_pre';
       box.append(bar, pre);
@@ -155,12 +147,91 @@ function installOverlay() {
       lines.forEach((l, i) => card.appendChild(el('div', { font: i === 0 ? '700 96px system-ui, sans-serif' : '500 44px/1.3 system-ui, sans-serif' }, l)));
       root().appendChild(card);
     },
+
+    // ---- the problem card (staged: `step` panels are visible) and the who-is-who diagram (staged by group) ----------------------
+    problem(step: number) {
+      root().querySelectorAll('.__rec_prob').forEach((n) => n.remove());
+      if (step < 0) return;
+      const card = el('div', { position: 'fixed', inset: '0', background: 'linear-gradient(135deg,#1b0f12,#3a1219)', color: '#fff', display: 'flex',
+        flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '34px', padding: '0 120px' });
+      card.className = '__rec_prob';
+      card.appendChild(el('div', { font: '700 64px system-ui, sans-serif', color: '#ff9b8a' }, '03:07   ALERT: checkout error rate above 5%'));
+      const row = el('div', { display: 'flex', gap: '36px' });
+      [['Logs', 'in one tool'], ['Metrics', 'in another tool'], ['Runbooks', 'in a wiki']].forEach(([a, b], i) => {
+        if (i + 1 > step) return;
+        const box = el('div', { width: '480px', padding: '34px', border: '4px solid #ff9b8a', borderRadius: '16px', background: 'rgba(255,255,255,.07)', textAlign: 'center' });
+        box.append(el('div', { font: '700 56px system-ui, sans-serif' }, a), el('div', { font: '500 38px system-ui, sans-serif', color: '#ffd0c7', marginTop: '10px' }, b));
+        row.appendChild(box);
+      });
+      card.appendChild(row);
+      if (step >= 4) card.appendChild(el('div', { font: '600 48px system-ui, sans-serif' }, 'Needed: the likely cause, in minutes.'));
+      if (step >= 5) card.appendChild(el('div', { font: '600 48px system-ui, sans-serif', color: '#7ee787' }, 'Wanted: the next incident learns from this one.'));
+      card.appendChild(el('div', { position: 'fixed', right: '40px', bottom: '28px', font: '500 24px system-ui, sans-serif', color: '#caa' }, 'Illustration of the problem, not product output'));
+      root().appendChild(card);
+    },
+    diagram(visible: string[], hi: string | null) {
+      root().querySelectorAll('.__rec_diag').forEach((n) => n.remove());
+      if (!visible.length && !hi) return;
+      const C: Record<string, [string, string]> = { platform: ['PLATFORM', '#1f6feb'], scaffold: ['REFERENCE SCAFFOLDING (swappable)', '#bf8700'], app: ['SAMPLE APP', '#2da44e'] };
+      const card = el('div', { position: 'fixed', inset: '0', background: '#f6f8fa', color: '#1f2328', fontFamily: 'system-ui, sans-serif' });
+      card.className = '__rec_diag';
+      card.appendChild(el('div', { position: 'absolute', left: '0', right: '0', top: '34px', textAlign: 'center', font: '700 50px system-ui, sans-serif' }, 'Who is who in this demo'));
+      const boxes: [string, string, string, string, number, number, number, number][] = [
+        // id, group, title, detail, x, y, w, h
+        ['signin', 'scaffold', 'Sign-in', 'any OpenID Connect provider that sends the roles the apps expect', 90, 150, 540, 190],
+        ['gateway', 'scaffold', 'Model gateway', 'any OpenAI-compatible endpoint (the stand-in model in this video)', 690, 150, 540, 190],
+        ['vault', 'scaffold', 'Secret vault', 'one small module of the shared kit; key from the platform', 1290, 150, 540, 190],
+        ['watched', 'app', 'Apps it watches', 'the sample shop, CityPulse, other sample apps', 90, 430, 540, 190],
+        ['pagerlens', 'app', 'PagerLens', 'the sample app: investigates incidents, remembers causes', 690, 430, 1140, 190],
+        ['db', 'platform', 'Postgres on AgentPG (EDB)', 'the instance and its extensions: pgvector, pg_trgm, tcn, edb_stat_monitor, query_advisor; db-users; restricted MCP', 90, 710, 1740, 190],
+      ];
+      for (const [id, g, t, d, x, y, w, h] of boxes) {
+        const on = visible.includes(id) || visible.includes(g) || hi === id || hi === g;
+        const [label, col] = C[g];
+        const box = el('div', { position: 'absolute', left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px', boxSizing: 'border-box', background: '#fff',
+          border: (hi === id || hi === g ? 10 : 5) + 'px solid ' + col, borderRadius: '16px', padding: '16px 24px', opacity: on ? '1' : '0.0',
+          boxShadow: hi === id || hi === g ? '0 0 30px ' + col : 'none' });
+        box.append(el('div', { font: '700 22px system-ui, sans-serif', color: col, letterSpacing: '1px' }, label),
+          el('div', { font: '700 38px system-ui, sans-serif', marginTop: '4px' }, t), el('div', { font: '500 26px/1.3 system-ui, sans-serif', color: '#57606a', marginTop: '6px' }, d));
+        card.appendChild(box);
+      }
+      const leg = el('div', { position: 'absolute', left: '90px', right: '90px', bottom: '60px', display: 'flex', gap: '60px', justifyContent: 'center', font: '600 30px system-ui, sans-serif' });
+      for (const k of ['platform', 'scaffold', 'app']) {
+        const [label, col] = C[k];
+        const chip = el('div', { display: 'flex', alignItems: 'center', gap: '14px' });
+        chip.append(el('div', { width: '34px', height: '34px', borderRadius: '8px', background: col }), el('div', {}, label));
+        leg.appendChild(chip);
+      }
+      card.appendChild(leg);
+      root().appendChild(card);
+    },
+    textBox(needle: string, last = false) {   // screen box of a piece of text in the terminal card (all lines it covers)
+      const p = document.getElementById('__rec_term_pre'); const node = p && p.firstChild; if (!node || !node.textContent) return null;
+      const i = last ? node.textContent.lastIndexOf(needle) : node.textContent.indexOf(needle); if (i < 0) return null;
+      const r = document.createRange(); r.setStart(node, i); r.setEnd(node, i + needle.length);
+      const rects = Array.from(r.getClientRects()); if (!rects.length) return null;
+      const x = Math.min(...rects.map((q) => q.left)), y = Math.min(...rects.map((q) => q.top));
+      return { x, y, width: Math.max(...rects.map((q) => q.right)) - x, height: Math.max(...rects.map((q) => q.bottom)) - y };
+    },
+    lineBox(n: number, count = 1) {   // screen box of lines n..n+count-1 of the terminal card
+      const p = document.getElementById('__rec_term_pre'); if (!p) return null;
+      const r = p.getBoundingClientRect(); const fs = parseFloat(getComputedStyle(p).fontSize); const lh = fs * 1.5;
+      return { x: r.left + 30, y: r.top + 26 + n * lh, width: r.width - 60, height: lh * count };
+    },
     clearTitle() { root().querySelectorAll('.__rec_title').forEach((n) => n.remove()); },
-    endcard(lines: string[]) {
+    endcard(lines: string[], legend = true) {
+      root().querySelectorAll('.__rec_end').forEach((n) => n.remove());
       const card = el('div', { position: 'fixed', inset: '0', background: 'rgba(11,18,32,.94)', color: '#fff', display: 'flex', flexDirection: 'column',
         alignItems: 'center', justifyContent: 'center', gap: '28px', textAlign: 'center' });
       card.className = '__rec_end';
-      lines.forEach((l, i) => card.appendChild(el('div', { font: i === 0 ? '700 64px system-ui, sans-serif' : '500 40px system-ui, sans-serif' }, l)));
+      lines.forEach((l, i) => card.appendChild(el('div', { font: i === 0 ? '700 60px system-ui, sans-serif' : '500 38px system-ui, sans-serif' }, l)));
+      const leg = el('div', { display: legend ? 'flex' : 'none', gap: '50px', marginTop: '20px', font: '600 30px system-ui, sans-serif' });
+      for (const [label, col] of [['PLATFORM: Postgres on AgentPG (EDB)', '#1f6feb'], ['REFERENCE SCAFFOLDING: sign-in, gateway, vault', '#bf8700'], ['SAMPLE APP: PagerLens', '#2da44e']]) {
+        const chip = el('div', { display: 'flex', alignItems: 'center', gap: '14px' });
+        chip.append(el('div', { width: '30px', height: '30px', borderRadius: '8px', background: col }), el('div', {}, label));
+        leg.appendChild(chip);
+      }
+      card.appendChild(leg);
       root().appendChild(card);
     },
   };
@@ -364,10 +435,11 @@ async function prepare(browser: Browser) {
     return (await r.json()).token as string;
   };
   const editorToken = await mk('editor', 'read');          // configured in the editor (scene 11), never shown
-  const ingestToken = await mk('demo-sender', 'ingest');   // used by the ingest call of scene 10, never shown
+  const ingestToken = await mk('demo-sender', 'ingest');   // used by the ingest calls (scene 8), never shown
+  const metricsToken = await mk('scraper', 'metrics');     // used to read /metrics in scene 9, never shown
   const state = await ctx.storageState();
   await ctx.close();
-  return { state, ingestToken, editorToken };
+  return { state, ingestToken, editorToken, metricsToken };
 }
 
 const clip = (s: string, n = 94) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
@@ -375,12 +447,60 @@ const clip = (s: string, n = 94) => (s.length > n ? s.slice(0, n - 1) + '…' : 
 // ---------------------------------------------------------------------------------------------------------------------
 // The recording
 // ---------------------------------------------------------------------------------------------------------------------
-test('record the PagerLens tutorial', async ({ browser, playwright, context }) => {
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Real database access for the terminal cards (psql against the local throwaway Postgres), real captures from the fleet
+// ---------------------------------------------------------------------------------------------------------------------
+const PSQL = process.env.PSQL_BIN || 'psql';
+const PGPORT = process.env.PG_PORT || '5432';
+const CAPTURES = process.env.CAPTURES_DIR || path.join(__dirname, '..', '..', '..', 'videos', 'live-captures');
+const PSQL_ENV = { PATH: process.env.PATH || '', PSQLRC: '/dev/null', PAGER: 'cat', HOME: os.tmpdir() };
+const psqlBase = (user: string) => ['-h', '127.0.0.1', '-p', PGPORT, '-U', user, 'pagerlens'];
+/** The command line as it is shown on the card (the same arguments that are run). */
+const psqlShown = (user: string, sql: string) => `$ psql -h 127.0.0.1 -p ${PGPORT} -U ${user} pagerlens -c "${sql}"`;
+/** Run psql with one -c and return stdout + stderr (an error such as "permission denied" is the point of some cards). */
+function psqlRun(user: string, sql: string): string {
+  const r = spawnSync(PSQL, [...psqlBase(user), '-c', sql], { encoding: 'utf8', env: PSQL_ENV });
+  return ((r.stdout || '') + (r.stderr || '')).replace(/\n+$/, '');
+}
+const psqlValue = (sql: string) => spawnSync(PSQL, [...psqlBase('postgres'), '-qtA', '-c', sql], { encoding: 'utf8', env: PSQL_ENV }).stdout.trim();
+
+const readCapture = (file: string) => {
+  const p = path.join(CAPTURES, file);
+  if (!fs.existsSync(p)) throw new Error(`capture missing: ${p} (set CAPTURES_DIR)`);
+  return fs.readFileSync(p, 'utf8');
+};
+/** One instance block of a capture: from the line that starts with `head` to the next blank line. */
+const captureBlock = (text: string, head: string) => {
+  const lines = text.split('\n');
+  const i = lines.findIndex((l) => l.startsWith(head));
+  if (i < 0) throw new Error(`capture block "${head}" not found`);
+  const out: string[] = [];
+  for (let j = i; j < lines.length && lines[j].trim() !== ''; j++) out.push(lines[j]);
+  return out;
+};
+
+const calloutBox = async (page: Page, box: { x: number; y: number; width: number; height: number } | null, text: string, ms = 3000, place: 'above' | 'below' | 'right' = 'above') => {
+  if (!box) return;
+  await page.evaluate(([b, t, p]) => (window as any).__rec.callout(b, t, p), [box, text, place] as const);
+  await page.waitForTimeout(Math.round(Math.max(ms * curPace, Math.min(ms, 2000) * PACE)));
+  await page.evaluate(() => (window as any).__rec.clearCallouts());
+};
+const tbox = (page: Page, needle: string, last = false) => page.evaluate(([n, l]) => (window as any).__rec.textBox(n, l), [needle, last] as const);
+const termOpen = (page: Page, label: string, note: string, accent = '#3fb950', font = 22) =>
+  page.evaluate(([l, n, a, f]) => (window as any).__rec.term(true, l, n, a, f), [label, note, accent, font] as const);
+const termClose = (page: Page) => page.evaluate(() => (window as any).__rec.term(false));
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The recording
+// ---------------------------------------------------------------------------------------------------------------------
+test('record the PagerLens customer video', async ({ browser, playwright, context }) => {
   fs.mkdirSync(OUT, { recursive: true });
-  const { state, ingestToken, editorToken } = await prepare(browser);
+  const { state, ingestToken, editorToken, metricsToken } = await prepare(browser);
   const up = await playwright.request.newContext();
   expect((await up.get(BASE + '/healthz')).ok(), `PagerLens answers at ${BASE}`).toBeTruthy();
   await up.dispose();
+  psqlValue('SELECT pg_stat_statements_reset()');   // the Database tab (scene 11) then shows only this recording's own traffic
 
   await context.addCookies(state.cookies); // signed in before the camera rolls: the password is never on screen
   await context.addInitScript(installOverlay);
@@ -388,363 +508,481 @@ test('record the PagerLens tutorial', async ({ browser, playwright, context }) =
 
   const nav = (tab: string) => page.locator(`#nav a[data-tab="${tab}"]`);
   const hypotheses = page.locator('section', { has: page.getByRole('heading', { name: 'Hypotheses' }) });
+  const runViewer = page.getByRole('heading', { name: 'Run viewer' });
+  const investigateBtn = page.getByRole('button', { name: 'Investigate', exact: true });
+  const R = (fn: string, ...a: any[]) => page.evaluate(([f, args]) => (window as any).__rec[f](...(args as any[])), [fn, a] as const);
 
   // ---- 0  Title card (no narration) -------------------------------------------------------------------------------
   curPace = PACE;
   const tTitle = Date.now();
   await page.goto('/#dashboard');
   await expect(page.locator('.svc-card')).toHaveCount(5);
-  await page.evaluate(() => (window as any).__rec.title(['PagerLens', 'From alert to confirmed cause: investigating incidents on Postgres with pgvector']));
+  await R('title', ['PagerLens', 'Find the likely cause in minutes, and let the next incident learn: a sample app on Postgres with AgentPG']);
   await page.waitForTimeout(3500 * PACE);
-  await page.evaluate(() => (window as any).__rec.clearTitle());
+  await R('clearTitle');
   sceneLog['0'] = { start: tTitle / 1000, end: Date.now() / 1000, natural: 0, hold: 3.5, pace: 1 };
 
-  // ---- 1  The dashboard ------------------------------------------------------------------------------------------
-  await scene(page, 1, 'Dashboard', 30, async (b) => {
-    for (const card of await page.locator('.svc-card').all()) {   // the cards while PagerLens is introduced
-      const bx = await card.boundingBox();
-      if (bx) await mmove(page, bx.x + bx.width / 2, bx.y + bx.height / 2, 25);
-      await pause(page, 1500);
-    }
-    await b.at('It never changes your systems');
-    await callout(page, page.locator('#nav'), 'Read-only by design', 2800, 'below');
-    await b.at('It runs on plain Postgres');
-    await lowerThird(page, 'PagerLens: Postgres + pgvector');
+  // ---- 1  The problem -------------------------------------------------------------------------------------------------
+  await scene(page, 1, 'The problem', 20, async (b) => {
+    await b.at('It is three in the morning');
+    await R('problem', 0);
+    await b.at('Your logs are in one tool');
+    await R('problem', 1); await pause(page, 1300);
+    await R('problem', 2); await pause(page, 1300);
+    await R('problem', 3);
+    await b.at('You need the likely cause');
+    await R('problem', 4);
+    await b.at('And you want the next incident');
+    await R('problem', 5);
+    await b.at('Here is how Postgres on AgentPG');
+    await R('problem', -1);
+    await lowerThird(page, 'PagerLens: one sample app, one Postgres');
     await b.endOfNarration();
     await lowerThird(page, null);
   });
 
-  // ---- 2  A service card -----------------------------------------------------------------------------------------
-  await scene(page, 2, 'Service card', 30, async (b) => {
-    const card = page.locator('.svc-card', { hasText: 'checkout-api' });
-    await glide(page, card);
-    await b.at('Look at checkout-api');
-    await callout(page, card.getByText(/depends on/), 'Dependencies separate causes from victims', 3000, 'above');
-    await b.at('That map matters later');
-    await click(page, card, 400, 800);
-    await expect(page).toHaveURL(/#service\/checkout-api/);
-    for (let i = 0; i < 4; i++) { await page.mouse.wheel(0, 120); await pause(page, 500); }   // the charts
-    await b.at('Everything here arrived');
-    await page.goBack();
-    await expect(page.locator('.svc-card')).toHaveCount(5);
-    await b.at('The page refreshes');
-    await callout(page, page.locator('#view-dashboard p', { hasText: /refreshes every 10 s/ }), 'Updates every 10 seconds', 2500, 'below');
+  // ---- 2  Who is who (platform, scaffolding, sample app) --------------------------------------------------------------
+  await scene(page, 2, 'Who is who', 40, async (b) => {
+    await b.at('Who is who?');
+    await R('diagram', ['app'], 'pagerlens');
+    await b.at('Three things around it are scaffolding');
+    await R('diagram', ['app', 'scaffold'], 'scaffold');
+    await b.at('Sign-in works with any');
+    await R('diagram', ['app', 'scaffold'], 'signin');
+    await b.at('The gateway is any');
+    await R('diagram', ['app', 'scaffold'], 'gateway');
+    await b.at('The vault is one small module');
+    await R('diagram', ['app', 'scaffold'], 'vault');
+    await b.at('The platform part is Postgres');
+    await R('diagram', ['app', 'scaffold', 'platform'], 'db');
+    await b.endOfNarration();
+    await R('diagram', ['app', 'scaffold', 'platform'], null);
   });
 
-  // ---- 3  The Lab ------------------------------------------------------------------------------------------------
-  await scene(page, 3, 'Lab: Break it', 40, async (b) => {
+  // ---- 3  Break the shop and investigate with Rules -------------------------------------------------------------------
+  await scene(page, 3, 'Break and investigate (Rules)', 50, async (b) => {
+    await R('diagram', [], null);
     await click(page, nav('lab'), 300, 400);
     await expect(page.getByRole('heading', { name: 'Lab', level: 1 })).toBeVisible();
     const bad = page.locator('article', { hasText: 'Bad release breaks checkout' });
-    await b.wander('A bad release');
-    await page.mouse.wheel(0, -2000);
-    await b.at('A bad release');
+    await b.at('This is the Lab');
     for (const art of (await page.locator('article', { has: page.getByRole('button', { name: 'Break it' }) }).all()).slice(0, 3)) {
       const bx = await art.boundingBox();
       if (bx) await mmove(page, bx.x + bx.width / 2, bx.y + bx.height / 2, 20);
-      await pause(page, 900);
+      await pause(page, 700);
     }
-    await b.at('The simulator writes');
-    await page.mouse.wheel(0, 380);                              // the confusing mixes further down
-    await pause(page, 1500);
-    await b.at('It also keeps the true cause hidden');
-    await callout(page, bad.locator('p.muted'), 'True cause is hidden', 3000, 'right');
-    await b.at('I will pick the bad release');
+    await b.at('I pick a bad release');
     await click(page, bad.getByRole('button', { name: 'Break it' }), 400, 600);
-    await b.at('It replaces the demo data');
-    await callout(page, page.locator('dialog[open]'), 'Replaces the demo telemetry; incidents are kept', 3000, 'below');
-    await b.at('Here is the new incident');
+    await b.at('An alert fires');
     await click(page, page.getByRole('button', { name: 'Continue' }), 300, 500);
     await expect(page).toHaveURL(/#incidents\/\d+/);
-  });
-  const firstIncidentUrl = page.url();
-
-  // ---- 4  Investigate with Rules --------------------------------------------------------------------------------
-  await scene(page, 4, 'Investigate (Rules)', 50, async (b) => {
-    await expect(page.getByRole('button', { name: 'Investigate', exact: true })).toBeVisible();
-    await glide(page, page.locator('.badge').first());           // the severity and status badges, the symptom
-    await b.at('I will investigate it');
+    await b.at('Now I ask why');
+    await glide(page, page.locator('#inv-mode'));
+    await b.at('I use the Rules method');
     await page.locator('#inv-mode').selectOption('rules');
     await expect(page.locator('#use-memory')).toBeChecked();
-    await b.at('Rules means no model');
-    await callout(page, page.locator('#inv-mode'), 'Rules: free and deterministic', 3000, 'below');
-    await b.at("Let's run it");
-    await click(page, page.getByRole('button', { name: 'Investigate', exact: true }), 300, 300);
+    await b.at('That is a fixed investigator');
+    await callout(page, page.locator('#inv-mode'), 'Rules: no model, no cost', 2200, 'below');
+    await click(page, investigateBtn, 200, 200);
     await toastText(page, 'Investigation finished');
-    await b.at('That took seconds');
-    await callout(page, page.getByRole('button', { name: /^Investigate/ }), 'Seconds, not minutes', 2000, 'below');
+    await b.at('Done, in seconds');
     await b.at('It asked read-only questions');
-    await reveal(page, page.getByRole('heading', { name: 'Run viewer' }), [160, 300]);   // the steps table shows exactly those queries
-    await b.at('Metrics, compared');
-    for (let i = 0; i < 3; i++) { await page.mouse.wheel(0, 140); await pause(page, 700); }
-    await b.at('The result is a ranked list');
+    await reveal(page, runViewer, [160, 300]);
+    await b.at('Metrics against a baseline');
+    await page.mouse.wheel(0, 140); await pause(page, 500);
+    await b.at('And slow queries');
+    await callout(page, page.getByText('slow_queries').first(), 'The new slow_queries step', 2600, 'right');
+    await b.at('The answer is a ranked list');
     await reveal(page, hypotheses.locator('article.hyp').first(), [200, 600]);
-    await callout(page, hypotheses.getByRole('heading', { name: 'Hypotheses' }), 'Ranked, each with a score', 3000, 'right');
+    await callout(page, hypotheses.getByRole('heading', { name: 'Hypotheses' }), 'Ranked, each with a score', 2500, 'right');
   });
-  // what the narration says: the release is the top hypothesis
+  const firstIncidentUrl = page.url();
   await expect(hypotheses.locator('article.hyp h3').first()).toContainText(/Release .* introduced the failure|deploy/i);
   await expect(hypotheses.locator('article.hyp h3').first()).toContainText('1.');
 
-  // ---- 5  Evidence -----------------------------------------------------------------------------------------------
-  await scene(page, 5, 'Evidence', 50, async (b) => {
+  // ---- 4  Evidence and report -----------------------------------------------------------------------------------------
+  await scene(page, 4, 'Evidence and report', 35, async (b) => {
     const top = hypotheses.locator('article.hyp').first();
     await reveal(page, top, [200, 560]);
-    await b.at('Every line says');
-    await callout(page, top.locator('.stance.supports').first(), 'Evidence for', 2500, 'right');
-    await b.at('Open an evidence link');
+    await b.at('It says a release was deployed');
+    await mmove(page, 900, 420, 20);
+    await b.at('Every line is evidence');
+    await callout(page, top.locator('.stance.supports').first(), 'Evidence for', 2400, 'right');
+    await b.at('Open one, and you see');
     await click(page, top.getByRole('button', { name: /^evidence #\d+$/ }).first(), 400, 900);
     await expect(page.locator('.obs')).toBeVisible();
     await b.at('Here, a new error signature');
-    await click(page, top.getByRole('button', { name: /^evidence #\d+$/ }).nth(1), 400, 700);   // the evidence for the new error signature
+    await click(page, top.getByRole('button', { name: /^evidence #\d+$/ }).nth(1), 400, 700);
     await expect(page.locator('.obs')).toContainText(/error_signatures/);
-    await b.at('The log text is untrusted');
-    await callout(page, page.locator('.obs pre'), 'Log text is untrusted data, shown, never obeyed', 3500, 'above');
-    await page.locator('.obs pre').first().hover();
-    await b.at('It also checks the opposite');
-    await click(page, page.locator('.obs').getByRole('button', { name: 'Close' }));
-    const refutes = hypotheses.locator('.stance.refutes');
-    if (await refutes.count()) await callout(page, refutes.first(), 'Evidence against', 3500, 'right');
-    else console.warn('[recorder] no "refutes" line on this run; the narration sentence about refuting checks is generic');
-  });
-
-  // ---- 6  Report and run viewer --------------------------------------------------------------------------------
-  await scene(page, 6, 'Report and Run viewer', 35, async (b) => {
-    const reportHeading = page.getByRole('heading', { name: 'Report', level: 2 });
-    await reveal(page, reportHeading, [200, 500]);
-    await b.at('It holds the most likely cause');
-    await callout(page, page.getByRole('heading', { name: /Most likely cause/ }), 'Most likely cause', 1800, 'right');
-    await callout(page, page.getByRole('heading', { name: /Timeline/ }), 'Timeline (UTC)', 1800, 'right');
-    await b.at('Copy it with one click');
-    await click(page, page.getByRole('button', { name: 'Copy Markdown' }), 400, 500);
-    await toastText(page, /copied|Copy failed/, 5000);
-    await b.at('Below it, the run viewer');
-    const runViewer = page.getByRole('heading', { name: 'Run viewer' });
-    await reveal(page, runViewer, [200, 400]);
-    await callout(page, runViewer, 'Every step is auditable', 3000, 'right');
-    await b.at('The runbook steps');
+    await b.at('Log text is untrusted');
+    await callout(page, page.locator('.obs pre'), 'Log text is untrusted data: shown, never obeyed', 3000, 'above');
+    await b.at('Below is the report');
+    await click(page, page.locator('.obs').getByRole('button', { name: 'Close' }), 300, 300);
+    await reveal(page, page.getByRole('heading', { name: 'Report', level: 2 }), [200, 500]);
+    await callout(page, page.getByRole('heading', { name: /Most likely cause/ }), 'Markdown report', 1800, 'right');
+    await b.at('The runbook steps are only');
     await callout(page, page.getByRole('heading', { name: /Suggested runbooks/ }), 'Manual steps only', 3000, 'right');
   });
 
-  // ---- 7  The other methods and provider accounts ------------------------------------------------------------------
-  await scene(page, 7, 'Methods and provider accounts', 35, async (b) => {
+  // ---- 5  AI investigation (stand-in model) ----------------------------------------------------------------------------
+  await scene(page, 5, 'AI investigation (Rules + AI) with the demo stand-in', 40, async (b) => {
     const mode = page.locator('#inv-mode');
     await page.mouse.wheel(0, -4000);
-    await pause(page, 800);
+    await pause(page, 600);
+    await b.at('The method is Rules plus AI');
     await glide(page, mode);
-    await b.at('The first is AI');
-    await mode.selectOption('llm');
-    await b.at('The second is Rules plus AI');
-    await mode.selectOption('hybrid');
-    await b.at('When they agree');
-    await callout(page, mode, 'Agreement: confidence goes up', 2500, 'below');
-    await b.at('When only the model believes');
-    await callout(page, mode, 'Model alone: confidence is capped', 2500, 'below');
-    await b.at('anything the model claims');
-    await callout(page, page.locator('p.hint', { hasText: /checked before it counts/ }), 'Model claims are checked against real evidence', 2800, 'below');
-    await b.at('To use a model');
-    await callout(page, mode, 'AI and Rules + AI need a chat account', 2200, 'below');
-    await click(page, nav('settings'), 300, 600);
-    const accounts = page.locator('#settings-accounts');
-    await reveal(page, accounts.getByRole('heading', { name: 'Provider accounts' }), [200, 400]);
-    await b.at('Keys are stored encrypted');
-    await click(page, accounts.getByRole('button', { name: 'Add account' }), 300, 500);
-    const provider = page.locator('#af-provider');
-    for (const label of ['OpenRouter', 'Custom']) {
-      const value = await page.locator('#af-provider option', { hasText: label }).first().getAttribute('value');
-      if (value) await provider.selectOption(value);
-      await pause(page, 900);
-    }
-    await callout(page, page.locator('#af-key'), 'Stored encrypted, never shown again', 3000, 'below');
-    await b.at('We have not measured');
-    await lowerThird(page, 'AI accuracy on live models: not measured yet');
-    await b.endOfNarration();
-    await lowerThird(page, null);
-    await click(page, page.locator('form.acct-form').getByRole('button', { name: 'Cancel' }), 300, 400);
-    await page.goBack(); // the incident
-    await expect(page).toHaveURL(firstIncidentUrl);
-  });
-
-  // ---- 8  AI investigation (stand-in model) ----------------------------------------------------------------------
-  await scene(page, 8, 'AI investigation (Rules + AI) with the demo stand-in', 50, async (b) => {
-    const mode = page.locator('#inv-mode');
     await mode.selectOption('hybrid');
     const account = page.locator('#inv-account');
     await expect(account).toBeVisible();
     await expect(account.locator('option')).not.toHaveCount(0);
-    await b.at('I choose an account');
-    await callout(page, account, 'The model uses the same read-only tools', 2800, 'below');
-    await b.at('This one is a stand-in');
-    await lowerThird(page, 'Demo stand-in model (scripts/fake_llm.py). With a real model the run reads the same');
-    await b.at('It is not a real model');
-    await b.wander('I press Investigate');
-    await page.mouse.wheel(0, -2000);
-    await b.at('I press Investigate');
-    await click(page, page.getByRole('button', { name: /^Investigate/ }), 300, 300);
-    await expect(page.getByRole('button', { name: /Investigating/ })).toBeVisible({ timeout: 5000 }).catch(() => {});
+    await b.at('Today the model is a stand-in');
+    await lowerThird(page, 'DEMO STAND-IN model (scripts/fake_llm.py), not a real model');
+    await b.at('So no key is needed');
+    await callout(page, account, 'Same read-only tools, stand-in model', 2200, 'below');
+    await click(page, page.getByRole('button', { name: /^Investigate/ }), 200, 200);
     await toastText(page, /Investigation finished|Finished with a warning/);
-    await b.at("Each of the model");
-    const runViewer = page.getByRole('heading', { name: 'Run viewer' });
+    await b.at('Each model turn shows up');
     await reveal(page, runViewer, [160, 300]);
     await page.mouse.wheel(0, 300);
-    await pause(page, 500);
-    await callout(page, page.locator('code', { hasText: 'AI turn' }).first(), 'Every AI turn and tool call is recorded', 3000, 'right');
-    await b.at('Then the two results');
+    await pause(page, 400);
+    await callout(page, page.locator('code', { hasText: 'AI turn' }).first(), 'Every AI turn and tool call is recorded', 2800, 'right');
+    await b.at('Both answers blame the release');
     const top = hypotheses.locator('article.hyp').first();
     await reveal(page, top, [200, 560]);
-    await b.at('The rules and the model both blame');
-    await callout(page, top.locator('p.hint').first(), 'Rules and AI agree: confidence goes up', 3500, 'below');
+    await callout(page, top.locator('p.hint').first(), 'Rules and AI agree: confidence goes up', 2800, 'below');
+    await b.at('We have not measured accuracy');
+    await lowerThird(page, 'AI accuracy on live models: not measured yet');
     await b.endOfNarration();
     await lowerThird(page, null);
   });
   await expect(hypotheses.locator('article.hyp').first().locator('.badge.src')).toContainText(/Rules \+ AI|both/i);
-  await expect(page.locator('code', { hasText: 'AI turn' }).first()).toBeVisible();
 
-  // ---- 9  Close the loop, break it again, memory recalled --------------------------------------------------------
-  await scene(page, 9, 'Close the loop and recall', 45, async (b) => {
+  // ---- 6  Memory: confirm the cause, break again, recalled --------------------------------------------------------------
+  await scene(page, 6, 'Close the loop and recall', 45, async (b) => {
     const closing = page.getByRole('heading', { name: 'Close the loop' });
+    await b.at('Now, the next incident should learn');
     await reveal(page, closing, [200, 400]);
     await expect(page.locator('#rc-cat')).toHaveValue('bad_deploy');
-    await b.at('I tell it the real cause');
+    await b.at('I confirm the real cause');
     await type(page, page.locator('#rc-note'), 'rollback of v2.14.0 fixed it');
-    await b.at('The incident is stored');
-    await callout(page, page.getByRole('button', { name: 'Mark resolved' }), 'Only human-confirmed causes become memory', 2500, 'above');
+    await b.at('PagerLens stores this incident');
     await click(page, page.getByRole('button', { name: 'Mark resolved' }), 300, 300);
     await toastText(page, 'Incident resolved and remembered', 15_000);
-    await b.at('The simulator can reveal');
-    await click(page, page.getByRole('button', { name: 'Reveal simulated answer' }), 300, 1200);
     await b.at('Now I break the same thing again');
-    await click(page, nav('lab'), 300, 400);
+    await click(page, nav('lab'), 250, 300);
     const bad = page.locator('article', { hasText: 'Bad release breaks checkout' });
-    await click(page, bad.getByRole('button', { name: 'Break it' }), 300, 400);
-    await click(page, page.getByRole('button', { name: 'Continue' }), 300, 400);
+    await click(page, bad.getByRole('button', { name: 'Break it' }), 250, 300);
+    await click(page, page.getByRole('button', { name: 'Continue' }), 250, 300);
     await expect(page).toHaveURL(/#incidents\/\d+/);
     expect(page.url()).not.toBe(firstIncidentUrl);
-    await expect(page.getByRole('button', { name: 'Investigate', exact: true })).toBeVisible();
+    await expect(investigateBtn).toBeVisible();
     await page.locator('#inv-mode').selectOption('rules');
-    await click(page, page.getByRole('button', { name: 'Investigate', exact: true }), 300, 300);
+    await click(page, investigateBtn, 250, 250);
     await toastText(page, 'Investigation finished');
     const similar = page.getByRole('heading', { name: /Similar past incidents/ });
     await reveal(page, similar, [200, 450]);
-    await b.at('The new report lists');
-    await callout(page, similar, 'Recalled from pgvector', 3500, 'right');
+    await b.at('The new report lists the earlier incident');
+    await callout(page, similar, 'Recalled from Postgres with pgvector', 3000, 'right');
+    await b.at('Nothing is learned from guesses');
+    await b.endOfNarration();
   });
-  // what the narration says: the earlier incident, and the cause it was resolved as, is in the second report
-  const similarHeading = page.getByRole('heading', { name: /Similar past incidents/ });
-  await expect(similarHeading).toBeVisible();
-  await expect(page.locator('section.card', { has: similarHeading })).toContainText(/#\d+ HighErrorRate \(checkout-api\), resolved as bad_deploy/);
+  await expect(page.locator('section.card', { has: page.getByRole('heading', { name: /Similar past incidents/ }) }))
+    .toContainText(/#\d+ HighErrorRate \(checkout-api\), resolved as bad_deploy/);
+  const newId = Number(psqlValue('SELECT max(id) FROM incident'));
+  expect(newId).toBeGreaterThan(1);
 
-  // ---- 10  Send your own alert (terminal card) -----------------------------------------------------------------
-  await scene(page, 10, 'Ingest an alert', 30, async (b) => {
-    const cmd = `curl -sS -X POST ${BASE}/api/ingest/alerts \\\n  -H "Authorization: Bearer $PAGERLENS_TOKEN" -H "Content-Type: application/json" \\\n  -d '{"service":"demo-api","name":"HighErrorRate","summary":"5xx above 5%","severity":"sev2"}'`;
-    await click(page, nav('dashboard'), 300, 500);               // the dashboard's "Send your own telemetry" help
-    await b.at('Create an ingest token');
-    const help = page.locator('details.help');
-    await click(page, help.locator('summary'), 300, 700);
-    await callout(page, help.locator('p.muted'), 'Ingest token: write-only', 3000, 'below');
-    await b.at('Then post logs');
-    await reveal(page, help.locator('pre'), [300, 700]);
-    await b.at('Every log line is scrubbed');
-    await callout(page, help.locator('p.muted'), 'Scrubbed before it is stored', 2800, 'below');
-    await b.at('Here is one alert');
-    await page.evaluate(() => (window as any).__rec.term(true, 'Terminal'));
-    const shown = await typeInTerm(page, '$ ', cmd);
-    await pause(page, 400);
+  // ---- 7  Under the hood: incident memory (pgvector, HNSW) and runbook hybrid search ----------------------------------------
+  await scene(page, 7, 'Under the hood: pgvector and hybrid search', 60, async (b) => {
+    const D = 28;
+    await b.at('Under the hood');
+    await termOpen(page, 'Incident memory: SQL from src/pagerlens/retrieval.py (abridged), output from a real psql run',
+      'local throwaway Postgres 17 with pgvector');
+    let shown = await typeInTerm(page, '', [
+      '-- similar_incidents(): which resolved incidents look like this one?',
+      'SELECT i.id, i.root_cause_category,',
+      '       1 - (i.embedding <=> :vec) AS similarity     -- <=> is the pgvector cosine distance',
+      'FROM incident i',
+      "WHERE i.status = 'resolved' AND i.embedding IS NOT NULL",
+      'ORDER BY i.embedding <=> :vec',
+      'LIMIT 5;'].join('\n'), D);
+    await b.at('It sorts resolved incidents');
+    await calloutBox(page, await tbox(page, '1 - (i.embedding <=> :vec) AS similarity'), 'pgvector: cosine distance', 2600, 'right');
+    await b.at('An HNSW index serves');
+    const idxSql = "SELECT indexdef FROM pg_indexes WHERE indexname IN ('incident_embedding', 'runbook_embedding', 'runbook_tsv') ORDER BY indexname";
+    shown = await typeInTerm(page, shown, `\n\n${psqlShown('postgres', idxSql)}\n`, D);
+    await b.at('These are the real index definitions');
+    const idxOut = psqlRun('postgres', idxSql);
+    expect(idxOut).toContain('USING hnsw (embedding vector_cosine_ops)');
+    shown += idxOut;
+    await showTerm(page, shown);
+    await calloutBox(page, await tbox(page, 'USING hnsw (embedding vector_cosine_ops)'), 'HNSW index on the vectors', 2600, 'above');
+    await b.at('Here is a real query plan');
+    const planSql = `SET enable_seqscan = off; EXPLAIN SELECT id FROM incident ORDER BY embedding <=> (SELECT embedding FROM incident WHERE id = ${newId}) LIMIT 5`;
+    const plan = psqlRun('postgres', planSql);
+    shown = await typeInTerm(page, '', `${psqlShown('postgres', planSql)}\n`, D);
+    shown += plan;
+    await showTerm(page, shown);
+    expect(plan, 'with sequential scans off the plan of the nearest-neighbour query uses the HNSW index').toContain('Index Scan using incident_embedding');
+    await calloutBox(page, await tbox(page, 'Index Scan using incident_embedding on incident'), 'The plan uses the HNSW index', 2800, 'below');
+    await b.at('And here is the real lookup');
+    const lookup = `SELECT b.id, b.root_cause_category AS cause,\n       round((1 - (a.embedding <=> b.embedding))::numeric, 3) AS similarity\nFROM incident a, incident b\nWHERE a.id = ${newId} AND b.status = 'resolved'\nORDER BY a.embedding <=> b.embedding LIMIT 5`;
+    const found = psqlRun('postgres', lookup);
+    expect(found).toContain('bad_deploy');
+    shown = await typeInTerm(page, '', `${psqlShown('postgres', lookup)}\n`, D);
+    shown += found;
+    await showTerm(page, shown);
+    await b.at('The earlier one comes back');
+    await calloutBox(page, await tbox(page, 'bad_deploy'), 'The confirmed earlier incident, with similarity', 2800, 'below');
+    await b.at('Runbooks use a hybrid search');
+    await termClose(page);
+    await termOpen(page, 'Runbook search: SQL from src/pagerlens/retrieval.py (abridged), result from a real call to this app', 'local throwaway Postgres 17');
+    shown = await typeInTerm(page, '', [
+      '-- search_runbooks(): full-text and vector search in ONE query',
+      'WITH vec AS (SELECT id, row_number() OVER (ORDER BY embedding <=> :vec) AS r',
+      '             FROM runbook ORDER BY embedding <=> :vec LIMIT 20),   -- pgvector, HNSW index',
+      '     lex AS (SELECT id, row_number() OVER (ORDER BY ts_rank(tsv, q) DESC) AS r',
+      "             FROM runbook, websearch_to_tsquery('english', :q) q",
+      '             WHERE tsv @@ q LIMIT 20),                             -- full-text, GIN index',
+      '     fused AS (SELECT COALESCE(vec.id, lex.id) AS id,',
+      '                      COALESCE(1.0/(60+vec.r),0) + COALESCE(1.0/(60+lex.r),0) AS score',
+      '               FROM vec FULL OUTER JOIN lex ON vec.id = lex.id)     -- reciprocal rank fusion',
+      'SELECT r.title, f.score FROM fused f JOIN runbook r ON r.id = f.id ORDER BY f.score DESC LIMIT 3;'].join('\n'), 12);
+    await b.at('One query runs full-text');
+    await calloutBox(page, await tbox(page, '-- search_runbooks(): full-text and vector search in ONE query'), 'Vector search + full-text search, fused', 3000, 'right');
+    await b.at('Here is the real result');
+    const mcp = await mcpSession(playwright, editorToken);
+    const rb = await mcp.call('search_runbooks', { query: 'checkout errors after a release', limit: 3 });
+    await mcp.dispose();
+    const rows: any[] = (rb.content || []).map((c: any) => JSON.parse(c.text));
+    expect(rows.length, 'search_runbooks returns runbooks').toBeGreaterThan(0);
+    shown += `\n\n> search_runbooks {"query": "checkout errors after a release"}   (real MCP call to this app)\n`
+      + rows.map((r, i) => clip(`  ${i + 1}. ${r.title}  [${r.category}]`, 100)).join('\n');
+    await showTerm(page, shown);
+    await calloutBox(page, await tbox(page, rows[0].title.slice(0, 30)), 'Best runbooks for the symptom', 2800, 'below');
+    await b.endOfNarration();
+    await termClose(page);
+  });
+
+  // ---- 8  Live updates with tcn -----------------------------------------------------------------------------------------
+  await scene(page, 8, 'tcn live updates', 50, async (b) => {
+    const D = 30;
+    const alertBody = (service: string) => ({ service, name: 'HighErrorRate', summary: '5xx above 5%', severity: 'sev2' });
+    const curl = (service: string) => `$ curl -sS -X POST ${BASE}/api/ingest/alerts \\\n    -H "Authorization: Bearer $PAGERLENS_TOKEN" -H "Content-Type: application/json" \\\n    -d '${JSON.stringify(alertBody(service))}'`;
+    await b.at('Next, live updates');
+    await click(page, nav('incidents'), 300, 500);
+    await expect(page.locator('table')).toBeVisible();
+    await b.at('The tcn extension makes');
+    await lowerThird(page, 'tcn: Postgres sends NOTIFY on every incident and alert row change');
+    await b.at('Here I listen to that channel');
+    await lowerThird(page, null);
+    await termOpen(page, 'psql LISTEN pl_changes: a real session on the local database', 'tcn = triggered change notification');
+    // a real psql session: LISTEN, then an empty query every half second so psql prints any notification it has received
+    const ps = spawn(PSQL, ['-qtA', ...psqlBase('postgres')], { env: PSQL_ENV });
+    let out = '';
+    ps.stdout.on('data', (d) => { out += d.toString(); });
+    ps.stderr.on('data', (d) => { out += d.toString(); });
+    ps.stdin.write('LISTEN pl_changes;\n');
+    const tick = setInterval(() => { try { ps.stdin.write('SELECT 1 WHERE false;\n'); } catch { /* closed */ } }, 400);
+    let shown = await typeInTerm(page, '', `$ psql -qtA -h 127.0.0.1 -p ${PGPORT} -U postgres pagerlens\nLISTEN pl_changes;\n(waiting for notifications)\n\n`, D);
+    await b.at('Now I send an alert');
+    shown += '-- in a second terminal --\n';
+    shown = await typeInTerm(page, shown, curl('demo-api') + '\n', D);
     const api = await playwright.request.newContext();
-    const res = await api.post(`${BASE}/api/ingest/alerts`, {
-      headers: { Authorization: `Bearer ${ingestToken}`, 'Content-Type': 'application/json' },
-      data: { service: 'demo-api', name: 'HighErrorRate', summary: '5xx above 5%', severity: 'sev2' },
-    });
+    const res = await api.post(`${BASE}/api/ingest/alerts`, { headers: { Authorization: `Bearer ${ingestToken}`, 'Content-Type': 'application/json' }, data: alertBody('demo-api') });
     const reply = await res.json();
     expect(reply.new_incident).toBe(true);
+    shown += JSON.stringify(reply) + '\n\n-- back in the psql session --\n';
+    await showTerm(page, shown);
+    const t0 = Date.now();
+    while (!/"alert",I/.test(out) && Date.now() - t0 < 8000) await page.waitForTimeout(150);
+    clearInterval(tick);
+    const notes = out.split('\n').filter((l) => l.startsWith('Asynchronous notification'));
+    expect(notes.length, 'tcn sent a notification for the incident and the alert').toBeGreaterThanOrEqual(2);
+    expect(notes.join('\n')).toContain('"incident",I');
+    shown += notes.map((l) => l.replace(/ received from server process with PID \d+\./, ' ...')).join('\n');
+    await showTerm(page, shown);
+    ps.stdin.end();
+    await b.at('Two notifications arrive');
+    await calloutBox(page, await tbox(page, 'Asynchronous notification'), 'One row change = one notification', 2400, 'above');
+    await b.at('The payload is only a table');
+    await calloutBox(page, await tbox(page, 'with payload'), 'Table, operation, row id. No row contents', 2800, 'above');
+    await b.at('The app holds one listening connection');
+    await termClose(page);
+    await lowerThird(page, 'One LISTEN connection in the app, pushed to every browser as server-sent events');
+    await expect(page.locator('tr', { hasText: 'demo-api' })).toBeVisible();
+    await b.at('Watch the list');
+    await lowerThird(page, null);
+    await mmove(page, 960, 700, 20);
+    await b.at('I send an alert for another service');
+    const tPost = Date.now();
+    const r2 = await api.post(`${BASE}/api/ingest/alerts`, { headers: { Authorization: `Bearer ${ingestToken}`, 'Content-Type': 'application/json' }, data: alertBody('demo-worker') });
+    expect((await r2.json()).new_incident).toBe(true);
     await api.dispose();
-    await b.at('The reply says');
-    await showTerm(page, `${shown}\n\n${JSON.stringify(reply)}`);
-    await lowerThird(page, 'Alert opened an incident');
-    await b.at('And there it is');
-    await page.evaluate(() => (window as any).__rec.term(false));
-    await lowerThird(page, null);
-    await click(page, nav('incidents'));
-    const row = page.locator('tr', { hasText: 'demo-api' });
-    await expect(row).toBeVisible();
-    await callout(page, row, 'Alert opened an incident', 3000, 'above');
-  });
-
-  // ---- 11  Connect an editor over MCP --------------------------------------------------------------------------
-  await scene(page, 11, 'Connect and MCP', 25, async (b) => {
-    await click(page, nav('connect'), 300, 500);
-    const client = page.locator('#client');
-    const pick = async (label: string) => {
-      const value = await page.locator('#client option', { hasText: label }).first().getAttribute('value');
-      if (value) await client.selectOption(value);
-    };
-    await pick('Claude Code');
-    await b.at('PagerLens speaks MCP');
-    await callout(page, page.locator('#client-snippet'), 'Bearer token, read-only recommended', 2800, 'above');
-    await b.at('Claude Code, VS Code and Cursor');
-    await pick('VS Code'); await pause(page, 1200);
-    await pick('Cursor'); await pause(page, 1200);
-    await pick('Claude Code');
-    await click(page, page.locator('#copy-snippet'), 300, 400);
-    // The editor segment is drawn as a terminal card with REAL MCP calls (the read-only `editor` token against /mcp); the
-    // assistant's own screen is not shown, and nothing below is invented: every line is built from the server's replies.
-    await b.at('Here are real calls');
-    const mcp = await mcpSession(playwright, editorToken);
-    await page.evaluate(() => (window as any).__rec.term(true, 'MCP client', 'real MCP calls to this local server with the read-only editor token'));
-    let shown = await typeInTerm(page, '$ ', `claude mcp add --transport http pagerlens ${BASE}/mcp \\\n    --header "Authorization: Bearer $PAGERLENS_TOKEN"\n\n`, 60);
-    await b.at('It can list incidents');
-    const listed = await mcp.call('list_incidents', { limit: 5 });
-    const rows: any[] = (listed.content || []).map((c: any) => JSON.parse(c.text));
-    expect(rows.length, 'MCP list_incidents returns the demo incidents').toBeGreaterThan(0);
-    shown += `> list_incidents {"limit": 5}\n` + rows.map((r) => clip(`  #${r.id}  ${r.severity}  ${r.status}  ${r.service}  ${r.title}`)).join('\n') + '\n\n';
-    await showTerm(page, shown);
-    await pause(page, 1800);
-    let target: any;
-    for (const r of rows) {                                      // the newest incident that has been investigated
-      const g = JSON.parse((await mcp.call('get_incident', { incident_id: r.id })).content[0].text);
-      if (g?.hypotheses?.length) { target = g; break; }
-    }
-    expect(target, 'MCP get_incident finds an investigated incident').toBeTruthy();
-    const h = target.hypotheses[0];
-    const ev = (h.evidence || []).filter((e: any) => e.stance === 'supports').slice(0, 2);
-    shown += `> get_incident {"incident_id": ${target.id}}\n  most likely cause: ${clip(h.title, 76)} (score ${Math.round(h.score * 100)}%)\n`
-      + ev.map((e: any) => clip(`  supports: ${e.note}`)).join('\n') + '\n\n';
-    await showTerm(page, shown);
-    await b.at('But a read-only token');
-    const refused = await mcp.call('add_note', { incident_id: target.id, note: 'tutorial: this write must be refused' });
-    expect(refused.isError, 'a read token cannot write').toBeTruthy();
-    shown += `> add_note {"incident_id": ${target.id}, "note": "..."}\n  ${clip(String(refused.content?.[0]?.text || '').replace(/^Error executing tool add_note: /, 'refused: '))}\n`;
-    await showTerm(page, shown);
-    await mcp.dispose();
-    await b.at('In the wider ecosystem');
-    await page.evaluate(() => (window as any).__rec.term(false));
-    await lowerThird(page, 'Ecosystem: CityPulse and the simulator report in; the LLM gateway serves the models');
-    await b.at('People sign in');
-    await b.wander('END', 100);
+    const row = page.locator('tr', { hasText: 'demo-worker' });
+    await expect(row).toBeVisible({ timeout: 6000 });   // the list polls every 20 s: it appeared through the SSE stream, not by a timer
+    console.log(`[recorder] the new row appeared ${(Date.now() - tPost) / 1000} s after the alert, with no reload`);
+    expect(Date.now() - tPost).toBeLessThan(6000);
+    await b.at('The new incident appears by itself');
+    await callout(page, row, 'Appeared by itself: no reload, no polling', 3000, 'above');
     await b.endOfNarration();
-    await lowerThird(page, null);
   });
 
-  // ---- 12  Recap -------------------------------------------------------------------------------------------------
-  await scene(page, 12, 'Recap', 25, async (b) => {
-    await click(page, nav('dashboard'), 300, 500);
-    await b.at('PagerLens collects telemetry');
-    for (const card of await page.locator('.svc-card').all()) {   // the cards while the recap is spoken
-      const bx = await card.boundingBox();
-      if (bx) await mmove(page, bx.x + bx.width / 2, bx.y + bx.height / 2, 25);
-      await pause(page, 1100);
-    }
-    await b.at('To try it');
-    await page.evaluate(() => (window as any).__rec.term(true, 'Quick start', 'the commands from docs/GUIDE.md; shown, not run'));
+  // ---- 9  The slow query story (dogfooding) -----------------------------------------------------------------------------
+  await scene(page, 9, 'Slow query', 60, async (b) => {
+    const D = 30;
+    await b.at('Now a quieter failure');
+    await click(page, nav('lab'), 300, 400);
+    const slow = page.locator('article', { hasText: 'A query regression slows inventory' });
+    await glide(page, slow);
+    await b.at('Every app on the kit exports');
+    await termOpen(page, 'The gauge every kit app exports on /metrics: real output from this local PagerLens', 'source here: pg_stat_statements; on AgentPG: edb_stat_monitor');
+    const m = await playwright.request.newContext();
+    const metrics = await (await m.get(`${BASE}/metrics`, { headers: { Authorization: `Bearer ${metricsToken}` } })).text();
+    await m.dispose();
+    const gauge = metrics.split('\n').filter((l) => l.startsWith('db_insights_top_query_mean_seconds{')).slice(0, 4);
+    expect(gauge.length, 'the gauge is exported').toBeGreaterThan(0);
+    let shown = await typeInTerm(page, '', `$ curl -s ${BASE}/metrics -H "Authorization: Bearer $PAGERLENS_TOKEN" \\\n    | grep ^db_insights_top_query_mean_seconds\n`, D);
+    await b.at('On this local Postgres it comes from');
+    shown += gauge.join('\n');
+    await showTerm(page, shown);
+    await b.at('This is the real gauge');
+    await calloutBox(page, await tbox(page, 'db_insights_top_query_mean_seconds{'), 'Mean seconds of a slow statement, per queryid', 2800, 'below');
+    await b.at("PagerLens's agent scrapes it");
+    await termClose(page);
+    await lowerThird(page, 'pagerlens-agent: scrape /metrics, keep each statement\'s history, alert when it is 3x slower');
+    await b.at('The Lab scenario writes the points');
+    await lowerThird(page, 'Lab: writes the points the agent would have pushed (synthetic values)');
+    await click(page, slow.getByRole('button', { name: 'Break it' }), 300, 500);
+    await click(page, page.getByRole('button', { name: 'Continue' }), 250, 400);
+    await expect(page).toHaveURL(/#incidents\/\d+/);
+    await b.at('I break it, and investigate');
+    await lowerThird(page, null);
+    await page.locator('#inv-mode').selectOption('rules');
+    await click(page, investigateBtn, 250, 250);
+    await toastText(page, 'Investigation finished');
+    await b.at('The top cause is a query');
+    const top = hypotheses.locator('article.hyp').first();
+    await reveal(page, top, [200, 520]);
+    await expect(top.locator('h3').first()).toContainText(/slower/);
+    await callout(page, top.locator('h3').first(), 'Top cause: Slow query', 2600, 'below');
+    await b.at('The evidence names the query');
+    const evText = await top.innerText();
+    const ev = evText.match(/query \S+ on inventory-api: mean [\d.]+ ms before, [\d.]+ ms now \(x[\d.]+\)/);
+    expect(ev, 'the slow query evidence line is shown').toBeTruthy();
+    console.log(`[recorder] evidence: ${ev![0]}`);
+    const supports = top.getByText(/ms before, .* ms now/).first();
+    await callout(page, supports, ev![0].replace(/^query \S+ on inventory-api: /, ''), 3600, 'below');
+    await b.at('The statement text itself');
+    await click(page, nav('insights'), 300, 600);
+    await expect(page.locator('#view-insights')).toContainText(/pg_stat_statements/, { timeout: 15_000 });
+    await callout(page, page.locator('#view-insights table').first(), 'Statement text, by queryid', 3000, 'above');
+    await b.endOfNarration();
+  });
+
+  // ---- 10  Database-enforced masking for a read-only user -------------------------------------------------------------------
+  await scene(page, 10, 'Masking for a read-only user', 50, async (b) => {
+    const D = 35;
+    const owner = await playwright.request.newContext({ storageState: state, extraHTTPHeaders: CSRF });
+    const note = await owner.post(`${BASE}/api/incidents/${newId}/notes`, { data: { body: 'Paged jordan.rivera@example.com, rollback in progress' } });
+    expect(note.ok(), 'note for the masking card').toBeTruthy();
+    await owner.dispose();
+    await b.at('Now, who may read this data');
+    await termOpen(page, 'Two database users on the same local database: the owner, and a read-only member of the group role a1p_readonly', 'real psql runs');
+    let shown = await typeInTerm(page, '', '# what a read-only user or an assistant should see: incidents, but no personal data and no secrets\n', D);
+    await b.at('On AgentPG, a read-only user comes');
+    shown = await typeInTerm(page, shown, '\n# on AgentPG:  agentpg db-users create --permission read      (not run here)\n', D);
+    await b.at('Locally, I created a role');
+    shown = await typeInTerm(page, shown, '# here: pl_reader, a member of a1p_readonly, made the same way (LOGIN IN ROLE a1p_readonly)\n\n', D);
+    await b.at('As the owner, a note holds');
+    const q1 = 'SELECT author, body FROM incident_note ORDER BY id DESC LIMIT 1';
+    const o1 = psqlRun('postgres', q1);
+    expect(o1).toContain('jordan.rivera@example.com');
+    shown = await typeInTerm(page, shown, `${psqlShown('postgres', q1)}\n`, D) + o1 + '\n\n';
+    await showTerm(page, shown);
+    await b.at('As the read-only role, the masked view');
+    const q2 = 'SELECT author, body FROM incident_note_masked ORDER BY id DESC LIMIT 1';
+    const o2 = psqlRun('pl_reader', q2);
+    expect(o2).toContain('[EMAIL]');
+    expect(o2).not.toContain('jordan.rivera');
+    shown = await typeInTerm(page, shown, `${psqlShown('pl_reader', q2)}\n`, D) + o2 + '\n\n';
+    await showTerm(page, shown);
+    await calloutBox(page, await tbox(page, '[EMAIL]'), 'Author as an initial, e-mail removed', 2600, 'below');
+    await b.at('The base table is denied');
+    const q3 = 'SELECT title FROM incident LIMIT 1';
+    const o3 = psqlRun('pl_reader', q3);
+    expect(o3).toContain('permission denied');
+    shown = await typeInTerm(page, '', `${psqlShown('pl_reader', q3)}\n`, D) + o3 + '\n\n';
+    await showTerm(page, shown);
+    await b.at('A write is denied too');
+    const q4 = "UPDATE incident SET status = 'resolved'";
+    const o4 = psqlRun('pl_reader', q4);
+    expect(o4).toContain('permission denied');
+    shown = await typeInTerm(page, shown, `${psqlShown('pl_reader', q4)}\n`, D) + o4 + '\n\n';
+    await showTerm(page, shown);
+    await b.at('And the tables with secrets');
+    const q5 = 'SELECT * FROM api_token';
+    const o5 = psqlRun('pl_reader', q5);
+    expect(o5).toContain('permission denied');
+    shown = await typeInTerm(page, shown, `${psqlShown('pl_reader', q5)}\n`, D) + o5 + '\n';
+    await showTerm(page, shown);
+    await b.at('Postgres enforces this');
+    await calloutBox(page, await tbox(page, 'permission denied for table api_token'), 'Enforced by the database, not by application code', 3000, 'above');
+    await b.endOfNarration();
+    await termClose(page);
+  });
+
+  // ---- 11  Database insights: local pg_stat_statements, REAL captured output from the AgentPG fleet ------------------------
+  await scene(page, 11, 'Database insights', 50, async (b) => {
+    const D = 25;
+    const exts = captureBlock(readCapture('extensions-installed.txt'), '# pagerlens (');
+    const recs = captureBlock(readCapture('ecoctl-insights.txt'), 'pagerlens (');
+    const footer = readCapture('ecoctl-insights.txt').split('\n').find((l) => l.startsWith('Read-only:')) || '';
+    expect(exts.join('\n')).toContain('edb_stat_monitor');
+    expect(exts.join('\n')).toContain('query_advisor');
+    expect(recs.join('\n')).toContain('CREATE INDEX ON public.alert');
+    await b.at('One more place to look');
+    await click(page, nav('insights'), 300, 600);
+    await expect(page.locator('#view-insights')).toContainText(/pg_stat_statements/, { timeout: 15_000 });
+    await b.at('On this local Postgres it shows only');
+    await callout(page, page.locator('#view-insights table').first(), 'Local Postgres: pg_stat_statements only', 3200, 'above');
+    await b.at('On AgentPG, the same page also shows');
+    await lowerThird(page, 'On AgentPG the same page also shows edb_stat_monitor, edb_pg_tuner (where installed) and query_advisor');
+    await b.at('I cannot show that page here');
+    await lowerThird(page, null);
+    await termOpen(page, 'CAPTURED from our live AgentPG fleet on 2026-10-28, not run now: agentpg extensions list', 'real capture, videos/live-captures', '#d29922');
+    await typeInTerm(page, '', exts.join('\n'), D);
+    await b.at("PagerLens's instance has");
+    await calloutBox(page, await tbox(page, 'edb_stat_monitor'), 'EDB query monitoring', 2200, 'right');
+    await calloutBox(page, await tbox(page, 'query_advisor'), 'EDB index advisor', 2200, 'right');
+    await b.at('And query_advisor already suggests');
+    await termClose(page);
+    await termOpen(page, 'CAPTURED from our live AgentPG fleet on 2026-10-28, not run now: ecoctl insights (runs agentpg recommend)', 'real capture, videos/live-captures', '#d29922', 20);
+    await typeInTerm(page, '', recs.join('\n') + '\n\n' + footer, D);
+    await calloutBox(page, await tbox(page, 'CREATE INDEX ON public.alert'), 'query_advisor: an index for the alert table', 2800, 'above');
+    await b.at('It only suggests');
+    await calloutBox(page, await tbox(page, 'Read-only: nothing was changed'), 'Suggestions only: nothing is changed', 2600, 'above');
+    await b.endOfNarration();
+    await termClose(page);
+  });
+
+  // ---- 12  Try it yourself ----------------------------------------------------------------------------------------------
+  await scene(page, 12, 'Try it yourself', 25, async (b) => {
+    await click(page, nav('dashboard'), 100, 100);
+    await b.at('Try it yourself');
+    await termOpen(page, 'Try it yourself (shown, not run)', 'from docs/GUIDE.md', '#58a6ff', 28);
     await typeInTerm(page, '', [
-      '$ git clone <the PagerLens repository> && cd pagerlens',
-      '$ docker compose up -d db',
+      '# needs a Postgres with pgvector and tcn',
       '$ pagerlens migrate',
       '$ pagerlens seed',
-      '$ pagerlens serve          # then open the Lab and press Break it',
-    ].join('\n'), 60);
-    await b.at('The guide covers');
-    await page.evaluate(() => (window as any).__rec.term(false));
-    await page.evaluate(() => (window as any).__rec.endcard(['Guide: docs/GUIDE.md in the PagerLens repository', 'Break it. Investigate. Confirm the cause.']));
+      '$ pagerlens serve          # then open the Lab and press Break it'].join('\n'), 35);
+    await b.at('Then open the Lab');
+    await b.at('The guide is in the docs folder');
+    await termClose(page);
+    await R('endcard', ['Guide: docs/GUIDE.md, section 15: EDB and AgentPG capabilities used by this app'], false);
+    await b.at('Next, try the slow query');
+    await R('endcard', ['Guide: docs/GUIDE.md, section 15: EDB and AgentPG capabilities used by this app', 'Next: the slow_query scenario in the Lab, and the Database tab'], false);
+    await b.at('The end card repeats the legend');
+    await R('endcard', ['Guide: docs/GUIDE.md, section 15: EDB and AgentPG capabilities used by this app', 'Next: the slow_query scenario in the Lab, and the Database tab'], true);
     await b.endOfNarration();
   });
 

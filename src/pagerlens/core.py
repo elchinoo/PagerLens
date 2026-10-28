@@ -36,6 +36,7 @@ PERMISSIONS = {
     "metrics:scrape": "scrape /metrics",
     "services:retire": "retire a service: delete it with its telemetry and close its open incidents (administrators only)",
     "settings:manage": "provider accounts, embeddings, API tokens, the vault and the admin password",
+    "tuning:manage": "see, approve, reject and (when the server allows it) apply tuning proposals for PagerLens' own database (administrators only)",
     "mcp:use": "use the MCP server (what it may do follows from the other permissions)",
 }
 READ = frozenset({"dashboard:read", "incidents:read", "runbooks:read", "mcp:use"})

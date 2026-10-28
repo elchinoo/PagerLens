@@ -97,6 +97,17 @@ affected version or commit.
   its output never triggers an action. A model can still be misled by hostile log text into a wrong *opinion*; the
   protection is that opinions need real cited evidence, are shown next to the rules' verdict, and a human decides.
   Model-written text in reports is labelled as such.
+- **Ask PagerLens** (`POST /api/ask`, the `ask` MCP tool). Same model-safety properties as above, plus: the turn runs on a
+  database connection opened READ ONLY; the model is offered nine read-only tools; every citation in its answer is checked
+  against the database (the record must exist and have been read through a tool in that conversation) and a failing one is
+  marked `UNVERIFIED`; questions are rate limited per caller and overall; conversations are kept in memory only, scrubbed,
+  bounded and bound to the credential that started them. What a tool returns is sent to the chat provider. Verification
+  proves a record exists and was read, not that it supports the claim.
+- **Tuning.** `tuning:manage` (administrators and `full` tokens) guards the proposals, their approval and the apply. Apply
+  is off unless `PAGERLENS_ALLOW_TUNING_APPLY=true`, changes only PagerLens' own database, only after an approval, only
+  through a strict allow-list parser (`CREATE INDEX` / `CREATE STATISTICS` on `public` tables; what runs is rebuilt from
+  the parsed pieces), one statement at a time with a statement and a lock timeout, and every step is written to
+  `tuning_audit`. It never changes a monitored system or a server setting.
 - Only a `full` token, an admin session or a federated `responder`/`admin` (permission `incidents:investigate`) can start an AI investigation, because it spends provider credit. Responders see the id, name and chat model of the accounts they may use, never base URLs or keys.
 
 **Platform**

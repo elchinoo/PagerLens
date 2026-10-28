@@ -16,6 +16,7 @@
 #               their narration and the checks fail)
 #   FFMPEG      ffmpeg binary Playwright's video recorder should use (default: the one on PATH). Playwright's own build is
 #               not downloaded: a private browsers directory under $WORK points its ffmpeg at this binary.
+#   CAPTURES_DIR real captures from the live AgentPG fleet (extensions-installed.txt, ecoctl-insights.txt; default ../../../videos/live-captures)
 #   TTS_DIR     folder with narrate.py (Kokoro), its .venv and models (default ../../../videos/tts relative to the project)
 # Needs: Kokoro narrator (TTS_DIR), Google Chrome, node + npm, ffmpeg/ffprobe with libx264, python3, the project's .venv
 # (`pip install -e ".[dev]"`). Re-running starts from a fresh database every time.
@@ -29,6 +30,7 @@ for tool in ffmpeg ffprobe python3 node npm; do command -v "$tool" >/dev/null ||
 [ -x "$HERE/../../.venv/bin/pagerlens" ] || { echo "missing .venv: python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'" >&2; exit 1; }
 [ -d "$HERE/node_modules/@playwright" ] || (cd "$HERE" && npm install --no-audit --no-fund)
 
+python3 -I "$HERE/narration.py" sync
 echo "== 1/5 narration (Kokoro, voices from the headers of docs/video/narration.txt; about 2 minutes)"
 python3 -I "$HERE/narration.py" audio "$WORK/narr"
 
@@ -46,6 +48,7 @@ URL="$("$HERE/stack.sh" start)"
 
 echo "== 4/5 recording (real Chrome, 1920x1080, PACE=$PACE; about 6 minutes)"
 rm -f "$OUT_DIR/pagerlens-tutorial.webm" "$OUT_DIR/scenes.json"
+PSQL_BIN="$(command -v psql)" PG_PORT=$((BASE_PORT + 1)) CAPTURES_DIR="${CAPTURES_DIR:-$HERE/../../../videos/live-captures}" \
 ADMIN_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(18))')" \
 PAGERLENS_URL="$URL" SETUP_LOG="$WORK/stack/app.log" PACE="$PACE" OUT_DIR="$OUT_DIR" \
 NARRATION_TIMING="$WORK/narr/timing.json" PACE_FILE="$HERE/pace.json" \

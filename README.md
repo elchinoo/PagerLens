@@ -26,7 +26,10 @@ It ships with a **self-contained demo**: a fictional five-service online shop th
 - **Memory:** mark the real cause and the incident is embedded in pgvector. Similar future incidents recall it as a prior. `pagerlens eval` measures a cold run against a warm one with the hidden answers.
 - **Runbooks:** retrieved with hybrid vector + full-text search (reciprocal rank fusion) and attached to the report as *manual* next steps.
 - **EDB and AgentPG features:** live incident pages through Postgres `tcn` notifications, a Database tab with EDB's query insights (`edb_stat_monitor`, `edb_pg_tuner`, `query_advisor`), a `slow_query` finding fed by the other apps' `db_insights_*` metrics, and database-enforced masking for read-only and AI access (`a1p_readonly` plus masked views). See [EDB and AgentPG capabilities used by this app](docs/GUIDE.md#edb-and-agentpg-capabilities-used-by-this-app).
-- **MCP server** at `/mcp` for Claude Code, VS Code, Codex, Cursor and more: ask "why is checkout failing?" from your editor.
+- **Ask PagerLens:** a chat tab (and the MCP tool `ask`) that answers plain-English questions ("Why is checkout-api failing?", "Have we seen this before?", "What is slow in the database?") by running a model over read-only tools. The answer must cite `[incident #N]`, `[evidence #N]` or `[runbook #N]`, and the server verifies every citation against the database: verified sources show as chips, anything else is marked `UNVERIFIED`. Bounded (rounds, tool calls, tokens, time, rate), read-only on a READ ONLY connection, log text fenced as untrusted data. See [Ask PagerLens](docs/GUIDE.md#710-ask-pagerlens-conversational-diagnostics).
+- **Tuning (propose and approve):** PagerLens proposes `CREATE INDEX` / `CREATE STATISTICS` for its own database from EDB's query advisor and writes advice for slow queries in monitored apps; an administrator approves or rejects; applying is **off by default** (`PAGERLENS_ALLOW_TUNING_APPLY=false`), runs only statements the strict allow-list parser accepts, one at a time with timeouts, is audited, and records an EXPLAIN before and after. PagerLens never changes a monitored system. See [Tuning](docs/GUIDE.md#711-tuning-propose-and-approve).
+- **MCP server** at `/mcp` for Claude Code, VS Code, Codex, Cursor and more: ask "why is checkout failing?" from your editor, with the `ask` tool for verified answers. A recipe for connecting Claude Code to PagerLens **and** the fleet's databases (read-only, through `ecoctl mcp`) is in [the guide](docs/GUIDE.md#91-connect-claude-code-to-pagerlens-and-the-fleet-databases).
+- **Not built, said plainly:** self-healing orchestration (AgentPG has no non-interactive way to restart or scale a sandbox, and PagerLens does not act on monitored systems). See [what is built and what is not](docs/GUIDE.md#17-chat-agents-tuning-and-self-healing-what-is-built-and-what-is-not).
 - **Safe by default:** first-run setup code, hashed tokens with separate `read`, `ingest`, `metrics` and `full` scopes, optional single sign-on with roles, encrypted provider keys, PII scrubbing of every log line before it is stored, a strict CSP and a non-root container. See [SECURITY.md](SECURITY.md).
 
 ## Quick start
@@ -250,7 +253,7 @@ Credentials that are not people map onto the same permissions through scopes. Lo
 
 Behind the roles and scopes are these permissions (see `src/pagerlens/core.py`): `dashboard:read`, `incidents:read`, `runbooks:read`,
 `incidents:investigate`, `incidents:write` (notes, resolve, bulk resolve, root cause), `services:retire` (admin only), `simulator:run`, `ingest:write`, `metrics:scrape`,
-`settings:manage` (accounts, tokens, vault, admin password) and `mcp:use`. A note added by a signed-in person carries their name.
+`settings:manage` (accounts, tokens, vault, admin password), `tuning:manage` (tuning proposals, administrators only) and `mcp:use`. A note added by a signed-in person carries their name.
 
 ## Using the MCP server
 
@@ -264,6 +267,7 @@ PagerLens serves [MCP](https://modelcontextprotocol.io) over streamable HTTP at 
 | `get_timeline(incident_id)` | read | The report's timeline |
 | `similar_incidents(text, limit?)` | read | Resolved incidents that look similar, with how they were resolved |
 | `search_runbooks(query, limit?)` | read | Hybrid search over runbooks |
+| `ask(question, conversation_id?)` | read | Answer a plain-English question with citations the server verified (needs a chat account on the server; spends its credit; rate limited; read-only) |
 | `investigate(incident_id, use_memory?, mode?, account?)` | **full** or responder | Run a bounded, read-only investigation. `mode` is `rules` (default), `llm` or `hybrid`; the AI modes need `account` (a chat account id, or `env`) and spend that provider's credit |
 | `add_note(incident_id, note)` | **full** or responder | Attach a note |
 | `mark_root_cause(incident_id, category, note?)` | **full** or responder | Record the confirmed cause; the incident becomes memory |

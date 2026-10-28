@@ -23,9 +23,14 @@ start)
   command -v initdb >/dev/null || { echo "initdb not found: set PG_BIN to a Postgres bin directory"; exit 1; }
   rm -rf "$S/pgdata"; mkdir -p "$S/pgdata"
   initdb -D "$S/pgdata" -U postgres --auth=trust -E UTF8 >"$S/initdb.log" 2>&1
-  pg_ctl -D "$S/pgdata" -l "$S/pg.log" -w -o "-p $PG_PORT -c listen_addresses=127.0.0.1 -c unix_socket_directories=''" start >/dev/null
+  pg_ctl -D "$S/pgdata" -l "$S/pg.log" -w -o "-p $PG_PORT -c listen_addresses=127.0.0.1 -c unix_socket_directories='' -c shared_preload_libraries=pg_stat_statements" start >/dev/null
   psql -h 127.0.0.1 -p "$PG_PORT" -U postgres -d postgres -q -c "CREATE DATABASE pagerlens ENCODING 'UTF8' TEMPLATE template0"
-  psql -h 127.0.0.1 -p "$PG_PORT" -U postgres -d pagerlens -q -c "CREATE EXTENSION vector" -c "CREATE EXTENSION pg_trgm"
+  psql -h 127.0.0.1 -p "$PG_PORT" -U postgres -d pagerlens -q -c "CREATE EXTENSION vector" -c "CREATE EXTENSION pg_trgm" -c "CREATE EXTENSION pg_stat_statements"
+  # Local stand-in for what AgentPG provides: the group role a1p_readonly (SELECT on every new table by default) and a login user
+  # in it, which is what `agentpg db-users create --permission read` makes. `pagerlens migrate` then hardens it (hardening.py).
+  psql -h 127.0.0.1 -p "$PG_PORT" -U postgres -d pagerlens -q -c "CREATE ROLE a1p_readonly NOLOGIN" \
+    -c "CREATE ROLE pl_reader LOGIN IN ROLE a1p_readonly" -c "GRANT USAGE ON SCHEMA public TO a1p_readonly" \
+    -c "ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT SELECT ON TABLES TO a1p_readonly"
   nohup "$PL/.venv/bin/python" "$PL/scripts/fake_llm.py" --port "$LLM_PORT" >"$S/fake-llm.log" 2>&1 &
   echo $! >"$S/llm.pid"
   E=(env -i PATH=/usr/bin:/bin HOME="$S" TMPDIR="$S" LANG=en_US.UTF-8 PYTHONUNBUFFERED=1 HOST=127.0.0.1 PORT="$APP_PORT"

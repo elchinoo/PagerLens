@@ -10,6 +10,14 @@ What it does, so nobody mistakes it for intelligence:
   error_signatures, recent_deploys) on the alerting service; the second turn answers with a JSON hypothesis picked by a
   fixed keyword table over the tool results and cites the observation ids it was shown. A plain "reply OK" request
   gets "OK".
+* ask: when the request offers the Ask PagerLens tools (list_incidents, get_incident, database_health ...), it answers three
+  plain-English questions deterministically BY ACTUALLY CALLING those tools, so a recording is reproducible and the server's
+  citation check has real, verifiable [incident #N] / [evidence #N] / [runbook #N] markers to verify:
+    "Why is checkout-api failing?"    list_incidents -> get_incident -> get_evidence + search_runbooks -> answer
+    "Have we seen this before?"       list_incidents -> get_incident -> similar_incidents -> answer
+    "What is slow in the database?"   database_health + list_services + list_incidents -> slow_queries per service -> answer
+  Any other question gets one honest line saying the stand-in only knows those three. The wording is a template filled from the
+  tool results: it is not reasoning.
 * embeddings: a signed feature-hashing vector (lexical, not semantic), of the requested `dimensions` (default 768).
 
 With a real model the investigation reads the same on screen; only the wording and the reasoning differ.
@@ -59,8 +67,123 @@ def _text(content) -> str:
     return content if isinstance(content, str) else json.dumps(content)
 
 
+# --- Ask PagerLens (conversational diagnostics) ---------------------------------------------------------------------------
+ASK_TOOLS = {"list_incidents", "get_incident", "database_health", "similar_incidents", "search_runbooks", "slow_queries"}
+_FENCE = re.compile(r"<untrusted_data>\n(.*)\n</untrusted_data>", re.S)
+_SERVICE = re.compile(r"\b([a-z][a-z0-9]*(?:-[a-z0-9]+)+)\b")
+_NOTE = f"({BANNER}: a template filled from the tool results, not reasoning.)"
+
+
+def _tool_call(n: int, name: str, args: dict) -> dict:
+    return {"id": f"call_{n}", "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+
+
+def _ask_state(messages: list) -> tuple[str, dict]:
+    """The question being answered and what the tools returned for it: {tool name: [payload, ...]} in call order."""
+    asking = max((i for i, m in enumerate(messages) if m.get("role") == "user"
+                  and not _text(m.get("content")).startswith("Answer now")), default=-1)
+    question = _text(messages[asking].get("content")) if asking >= 0 else ""
+    names, got = {}, {}
+    for m in messages[asking + 1:]:
+        for c in m.get("tool_calls") or []:
+            names[c.get("id")] = (c.get("function") or {}).get("name")
+        if m.get("role") == "tool":
+            found = _FENCE.search(_text(m.get("content")))
+            try:
+                payload = json.loads(found.group(1)) if found else {}
+            except ValueError:
+                payload = {}
+            got.setdefault(names.get(m.get("tool_call_id")), []).append(payload)
+    return question, got
+
+
+def _pick_incident(listing: dict) -> dict | None:
+    rows = listing.get("incidents") or []
+    return next((r for r in rows if r.get("status") != "resolved"), rows[0] if rows else None)
+
+
+def ask_reply(body: dict) -> dict:
+    question, got = _ask_state(body.get("messages") or [])
+    q = question.lower()
+    reply = lambda text: {"role": "assistant", "content": text}  # noqa: E731
+    calls = lambda *specs: {"role": "assistant", "content": None,  # noqa: E731
+                            "tool_calls": [_tool_call(i, n, a) for i, (n, a) in enumerate(specs, 1)]}
+    if "slow" in q and re.search(r"database|quer|sql", q):
+        if not got:
+            return calls(("database_health", {"limit": 5}), ("list_services", {}), ("list_incidents", {"limit": 10}))
+        health, services = (got.get("database_health") or [{}])[0], ((got.get("list_services") or [{}])[0].get("services") or [])
+        if "slow_queries" not in got and len(got) < 4:
+            pick = [s["name"] for s in services if s.get("open_incidents")] or [s["name"] for s in services]
+            return calls(*[("slow_queries", {"service": n}) for n in pick[:4]]) if pick else reply("No services are monitored yet. " + _NOTE)
+        cite = {i.get("service"): i.get("cite") for i in reversed((got.get("list_incidents") or [{}])[0].get("incidents") or [])
+                if i.get("status") != "resolved"}
+        lines = []
+        for r in got.get("slow_queries") or []:
+            for f in r.get("queries") or []:
+                lines.append(f"query {f['queryid']} in {r.get('service')} went from {f['baseline_ms']:g} ms to {f['current_ms']:g} ms "
+                             f"(x{f['ratio']:g}) {cite.get(r.get('service'), '')}".strip())
+        head = (f"In the monitored services: {'; '.join(lines)}." if lines else "No monitored service reports a statement that got slower.")
+        tq = health.get("top_queries") or {}
+        own = (f"PagerLens's own database: slowest statement {tq['queries'][0]['queryid']} averages {tq['queries'][0]['mean_ms']:g} ms."
+               if tq.get("available") and tq.get("queries") else
+               f"PagerLens's own database statistics are not available here ({tq.get('reason', 'no reason given')}).")
+        tun, adv = health.get("tuner") or {}, health.get("advisor") or {}
+        tail = (f"The tuner has {len(tun.get('recommendations') or [])} recommendation(s) and the advisor "
+                f"{len(adv.get('suggestions') or [])} index hint(s)" if tun.get("available") or adv.get("available") else
+                "The tuner and the advisor are not available on this database")
+        return reply(f"{head} {own} {tail}; {health.get('open_tuning_proposals', 0)} tuning proposal(s) wait in the Tuning tab. {_NOTE}")
+    if re.search(r"seen (this|it|that)? ?before|happened before|similar", q):
+        if not got:
+            return calls(("list_incidents", {"limit": 3}))
+        cur = _pick_incident((got.get("list_incidents") or [{}])[0])
+        if cur is None:
+            return reply("There are no incidents yet, so there is nothing to compare. " + _NOTE)
+        if "get_incident" not in got:
+            return calls(("get_incident", {"incident_id": cur["id"]}))
+        inc = got["get_incident"][0]
+        if "similar_incidents" not in got:
+            return calls(("similar_incidents", {"text": f"{inc.get('service')}: {inc.get('title')} {inc.get('symptom') or ''}"[:400]}))
+        sim = (got["similar_incidents"][0].get("incidents") or [])
+        if not sim:
+            return reply(f"No resolved incident looks like {inc.get('cite')} yet: this may be the first time, or earlier ones were never "
+                         f"marked with a cause. {_NOTE}")
+        parts = [f"{s['cite']} {s['title']} ({s['service']}), resolved as {s['root_cause_category']} (similarity {s['similarity']:g})" for s in sim[:3]]
+        return reply(f"Yes. {inc.get('cite')} looks like {len(sim)} earlier incident(s): {'; '.join(parts)}. {_NOTE}")
+    if "fail" in q or "why" in q:
+        service = (_SERVICE.search(q) or [None, None])[1]
+        if not got:
+            return calls(("list_incidents", {"limit": 3, **({"service": service} if service else {})}))
+        cur = _pick_incident((got.get("list_incidents") or [{}])[0])
+        if cur is None:
+            return reply(f"I found no incident for {service or 'any service'}, so there is nothing to explain. {_NOTE}")
+        if "get_incident" not in got:
+            return calls(("get_incident", {"incident_id": cur["id"]}))
+        inc = got["get_incident"][0]
+        hyp = (inc.get("hypotheses") or [None])[0]
+        if hyp is None:
+            return reply(f"{inc.get('cite')} ({inc.get('service')}) has not been investigated yet, so there is no ranked cause to read. "
+                         f"Ask an investigator to run one. {_NOTE}")
+        ev = (hyp.get("evidence") or [None])[0]
+        if "get_evidence" not in got and "search_runbooks" not in got:
+            return calls(*([("get_evidence", {"evidence_id": int(re.search(r"#(\d+)", ev["cite"]).group(1))})] if ev else []),
+                         ("search_runbooks", {"query": f"{hyp.get('title')} {inc.get('service')}", "category": hyp.get("category")}))
+        seen_ev = (got.get("get_evidence") or [None])[0]
+        rb = ((got.get("search_runbooks") or [{}])[0].get("runbooks") or [None])[0]
+        text = (f"{inc.get('service')} is failing in {inc.get('cite')}: the top-ranked cause is \"{hyp['title']}\" "
+                f"(score {hyp['score']:.0%}, {hyp['source']}).")
+        if seen_ev:
+            text += f" Evidence {seen_ev['cite']} ({seen_ev['source']}): {str(seen_ev['summary']).rstrip('.')}."
+        if rb:
+            text += f" Suggested manual steps: runbook {rb['cite']} \"{rb['title']}\"."
+        return reply(f"{text} {_NOTE}")
+    return reply("This demo stand-in only knows three questions: why a service is failing, whether we have seen this before, and what is "
+                 "slow in the database. A real model would answer anything. " + _NOTE)
+
+
 def chat_reply(body: dict) -> dict:
     """The assistant message for one chat-completions request."""
+    if ASK_TOOLS <= {(t.get("function") or {}).get("name") for t in body.get("tools") or []}:
+        return ask_reply(body)
     messages = body.get("messages") or []
     last_user = next((_text(m.get("content")) for m in reversed(messages) if m.get("role") == "user"), "")
     if not body.get("tools") and "single word OK" in last_user:

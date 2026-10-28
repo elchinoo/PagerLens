@@ -15,9 +15,11 @@
   <nav id="nav" class="tabs" hidden>
     <a href="#dashboard" data-tab="dashboard">Dashboard</a>
     <a href="#incidents" data-tab="incidents">Incidents</a>
+    <a href="#ask" data-tab="ask">Ask</a>
     <a href="#runbooks" data-tab="runbooks">Runbooks</a>
     <a href="#lab" data-tab="lab">Lab</a>
     <a href="#insights" data-tab="insights">Database</a>
+    <a href="#tuning" data-tab="tuning">Tuning</a>
     <a href="#settings" data-tab="settings">Settings</a>
     <a href="#connect" data-tab="connect">Connect</a>
   </nav>
@@ -31,9 +33,11 @@
   <section id="view-dashboard" hidden></section>
   <section id="view-service" hidden></section>
   <section id="view-incidents" hidden></section>
+  <section id="view-ask" hidden></section>
   <section id="view-runbooks" hidden></section>
   <section id="view-lab" hidden></section>
   <section id="view-insights" hidden></section>
+  <section id="view-tuning" hidden></section>
 
   <section id="view-settings" hidden>
     <h1>Settings</h1>
@@ -53,7 +57,7 @@
         <p id="client-where" class="muted"></p>
         <div class="codewrap"><pre class="code"><code id="client-snippet"></code></pre><button id="copy-snippet" class="secondary small" type="button">Copy</button></div>
       </li>
-      <li>Ask your assistant: <em>"Using pagerlens, what incidents are open and what is the most likely cause of the newest one?"</em></li>
+      <li>Ask your assistant: <em>"Using pagerlens, what incidents are open and what is the most likely cause of the newest one?"</em> The <code>ask</code> tool answers a plain-English question with citations the server has verified (it needs a chat account on this server and spends its credit).</li>
     </ol>
     <p class="muted">Server URL: <code id="mcp-url"></code></p>
   </section>

@@ -199,3 +199,21 @@ def test_simulator_answer_key_is_hidden_from_the_read_only_role(roles):
         c.commit()
     with ro() as r, pytest.raises(psycopg.errors.InsufficientPrivilege):
         r.execute("SELECT scenario FROM sim_truth")
+
+
+def test_tuning_proposals_are_masked_for_the_read_only_role(roles):
+    with connect() as c:
+        pid = c.execute("INSERT INTO tuning_proposal (source, statement, applicable, rationale, status, decided_by, decision_note) "
+                        "VALUES ('advisor','CREATE INDEX ON public.incident (status)', true, 'seen for jane.doe@example.com', 'approved', 'Jane Doe', "
+                        "'mail jane.doe@example.com') RETURNING id").fetchone()["id"]
+        c.execute("INSERT INTO tuning_audit (proposal_id, action, actor, detail) VALUES (%s,'approved','Jane Doe','by jane.doe@example.com')", (pid,))
+        c.commit()
+    with ro() as r:
+        for base in ("tuning_proposal", "tuning_audit"):
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                r.execute(f"SELECT * FROM {base}")                                    # noqa: S608 - fixed names
+        p = r.execute("SELECT * FROM tuning_proposal_masked WHERE id=%s", (pid,)).fetchone()
+        assert p["decided_by"] == "J***" and "jane.doe" not in p["rationale"] + p["decision_note"] and p["status"] == "approved"
+        assert p["statement"] == "CREATE INDEX ON public.incident (status)"
+        a = r.execute("SELECT * FROM tuning_audit_masked WHERE proposal_id=%s", (pid,)).fetchone()
+        assert a["actor"] == "J***" and "jane.doe" not in a["detail"] and a["action"] == "approved"
