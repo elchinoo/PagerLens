@@ -61,6 +61,10 @@ Rules you must follow:
   database. Never answer from memory or general knowledge about what exists here.
 - State only what the tools returned in this conversation. Never invent an incident, evidence or runbook number, a service name, a
   title, a metric or a cause. Service names and numbers must come from a tool result.
+- Service names are exact slugs (for example checkout-api, citypulse-fleet-gotham). If you are unsure of a name, call list_services
+  first. A tool result may carry `service_resolved` (the name you asked for was matched loosely to the services listed in `matched`;
+  say so in your answer) or `no_such_service` with `did_you_mean` (retry with one of those names, or list_services). Use these fields
+  instead of concluding that nothing exists; a `did_you_mean` with `other_statuses` means incidents exist under another status.
 - "No data" is a good answer. If the tools return nothing relevant, say plainly that nothing was found; do not fill the gap.
 - Cite every factual claim with the marker the tool result gives in its "cite" field, copied exactly. The ONLY citation formats are
   [incident #N], [evidence #N] and [runbook #N], for example: "checkout-api is failing after a release [incident #12]; the deploy
@@ -223,13 +227,62 @@ def _list_services(conn) -> ToolOut:
     return ToolOut({"services": [{k: s[k] for k in ("name", "tier", "depends_on", "open_incidents")} for s in incidents.fleet(conn)]})
 
 
+MATCH_CAP = 5          # at most this many services are matched loosely; more would flood a bounded answer
+
+
+def _resolve_service(conn, asked, legacy: bool = False) -> tuple[dict | None, list[str]]:
+    """Map the model's service argument to real service names: exact; else case-insensitive prefix; else substring (spaces and
+    underscores read as hyphens); else pg_trgm similarity above 0.3 (best first). At most MATCH_CAP names. Returns
+    (`{asked, matched, method[, more]}` or None, did_you_mean): did_you_mean (the MATCH_CAP most similar service names) is only
+    filled when nothing matched. `legacy` also accepts a name that only exists on incidents without a service row. Parameterised
+    SQL throughout; reads the service table only, which every caller of Ask may already list."""
+    asked = _str(asked, 63).strip()
+    if not asked:
+        return None, []
+    sql = "SELECT name FROM service WHERE name=%s"
+    exact = conn.execute(sql + (" UNION SELECT service_name FROM incident WHERE service_name=%s" if legacy else ""),
+                         (asked, asked) if legacy else (asked,)).fetchall()
+    if exact:
+        return {"asked": asked, "matched": [asked], "method": "exact"}, []
+    norm = re.sub(r"[\s_]+", "-", asked.lower())
+    for method, where in (("prefix", "starts_with(lower(name), %s)"), ("substring", "strpos(lower(name), %s) > 0")):
+        rows = conn.execute(f"SELECT name FROM service WHERE {where} ORDER BY name LIMIT %s", (norm, MATCH_CAP + 1)).fetchall()  # noqa: S608 - fixed text
+        if rows:
+            res = {"asked": asked, "matched": [r["name"] for r in rows[:MATCH_CAP]], "method": method}
+            if len(rows) > MATCH_CAP:
+                res["more_matches"] = True
+            return res, []
+    rows = conn.execute("SELECT name, similarity(name, %s) AS sim FROM service ORDER BY sim DESC, name LIMIT %s",
+                        (asked, MATCH_CAP)).fetchall()
+    close = [r["name"] for r in rows if r["sim"] > 0.3]
+    if close:
+        return {"asked": asked, "matched": close, "method": "trigram"}, []
+    return None, [r["name"] for r in rows]
+
+
 def _list_incidents(conn, status: str = "", service: str = "", limit: int = 8) -> ToolOut:
     status = status if status in ("open", "investigating", "resolved") else None
-    rows = incidents.list_incidents(conn, status=status, service=_str(service, 63) or None, limit=_int(limit, 8, 1, 15))
-    out = ToolOut({"incidents": [{"cite": _cite("incident", r["id"]), "id": r["id"], "title": r["title"], "status": r["status"],
-                                  "severity": r["severity"], "service": r["service"], "detected_at": r["detected_at"],
-                                  "root_cause_category": r["root_cause_category"], "top_hypothesis": r["top_hypothesis"]}
-                                 for r in rows], "untrusted_fields": ["title", "top_hypothesis"]})
+    limit = _int(limit, 8, 1, 15)
+    names, extra = None, {}
+    if _str(service, 63).strip():
+        res, hint = _resolve_service(conn, service, legacy=True)
+        if res is None:
+            return ToolOut({"incidents": [], "no_such_service": _str(service, 63), "did_you_mean": hint,
+                            "note": "no service has that name; retry with one of did_you_mean or call list_services"})
+        names, extra = res["matched"], {"service_resolved": res}
+    rows = incidents.list_incidents(conn, status=status, services=names, limit=limit)
+    data = {**extra, "incidents": [{"cite": _cite("incident", r["id"]), "id": r["id"], "title": r["title"], "status": r["status"],
+                                    "severity": r["severity"], "service": r["service"], "detected_at": r["detected_at"],
+                                    "root_cause_category": r["root_cause_category"], "top_hypothesis": r["top_hypothesis"]}
+                                   for r in rows], "untrusted_fields": ["title", "top_hypothesis"]}
+    if names and len(names) > 1:
+        data["by_service"] = {n: sum(1 for r in rows if r["service"] == n) for n in names}
+    if names and status and not rows:
+        others = {k: v for k, v in incidents.count_by_status(conn, names).items() if k != status}
+        if others:
+            data["did_you_mean"] = {"other_statuses": others,
+                                    "note": f"no {status} incidents for this service, but there are incidents under other statuses"}
+    out = ToolOut(data)
     out.seen["incident"].update(r["id"] for r in rows)
     return out
 
@@ -291,14 +344,21 @@ def _search_runbooks(conn, query: str = "", category: str = "") -> ToolOut:
 
 
 def _slow_queries(conn, service: str = "") -> ToolOut:
-    name = _str(service, 63)
-    row = conn.execute("SELECT s.id, (SELECT max(ts) FROM metric_point m WHERE m.service_id = s.id) AS anchor FROM service s WHERE s.name=%s",
-                       (name,)).fetchone()
-    if not row:
-        return ToolOut({"error": f"unknown service {name!r}"})
-    anchor = row["anchor"] or conn.execute("SELECT now() AS t").fetchone()["t"]
-    res = tools.slow_queries(tools.Ctx(conn, 0, name, anchor), name)
-    return ToolOut({**res.data, "as_of": anchor, "summary": res.summary})
+    res, hint = _resolve_service(conn, service)
+    if res is None:
+        return ToolOut({"error": f"unknown service {_str(service, 63)!r}", "no_such_service": _str(service, 63), "did_you_mean": hint})
+    parts = []
+    for name in res["matched"]:
+        row = conn.execute("SELECT s.id, (SELECT max(ts) FROM metric_point m WHERE m.service_id = s.id) AS anchor FROM service s "
+                           "WHERE s.name=%s", (name,)).fetchone()
+        if not row:
+            continue
+        anchor = row["anchor"] or conn.execute("SELECT now() AS t").fetchone()["t"]
+        r = tools.slow_queries(tools.Ctx(conn, 0, name, anchor), name)
+        parts.append({**r.data, "as_of": anchor, "summary": r.summary})
+    if len(parts) == 1:
+        return ToolOut({**parts[0], "service_resolved": res})
+    return ToolOut({"service_resolved": res, "services": parts, "untrusted_fields": ["services"]})
 
 
 def _get_timeline(conn, incident_id: int = 0) -> ToolOut:
@@ -336,7 +396,8 @@ TOOLS = {
     "list_services": (_list_services, {"description": "The monitored services with tier, dependencies and open incident counts.",
                                        "properties": {}, "required": []}),
     "list_incidents": (_list_incidents, {"description": "Recent incidents, newest first. Filter by status (open, investigating, resolved) "
-                                                        "and/or service name. Each result has a 'cite' marker.",
+                                                        "and/or service name (an exact slug; a close name is resolved loosely and reported in 'service_resolved'). "
+                                                        "Each result has a 'cite' marker.",
                                          "properties": {"status": {"type": "string"}, "service": {"type": "string"},
                                                         "limit": {"type": "integer"}}, "required": []}),
     "get_incident": (_get_incident, {"description": "One incident: alerts, notes, the ranked hypotheses of its latest investigation with "

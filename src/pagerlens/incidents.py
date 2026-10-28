@@ -6,14 +6,25 @@ class NotFound(LookupError):
     pass
 
 
-def list_incidents(conn, *, status: str | None = None, limit: int = 50, service: str | None = None) -> list[dict]:
+def list_incidents(conn, *, status: str | None = None, limit: int = 50, service: str | None = None,
+                   services: list[str] | None = None) -> list[dict]:
+    """`service` is one exact name; `services` is a list of exact names (either filters, `services` wins). Always parameterised."""
+    names = list(services) if services is not None else ([service] if service else None)
     return conn.execute(
         "SELECT i.id, i.title, i.status, i.severity, COALESCE(s.name, i.service_name) AS service, i.detected_at, i.resolved_at, "
         "i.root_cause_category, i.root_cause_note, (SELECT count(*) FROM alert a WHERE a.incident_id = i.id) AS alerts, "
         "(SELECT h.title FROM hypothesis h WHERE h.incident_id = i.id ORDER BY h.run_id DESC, h.rank LIMIT 1) AS top_hypothesis "
         "FROM incident i LEFT JOIN service s ON s.id = i.service_id WHERE (%s::text IS NULL OR i.status = %s) "
-        "AND (%s::text IS NULL OR COALESCE(s.name, i.service_name) = %s) "
-        "ORDER BY i.detected_at DESC LIMIT %s", (status, status, service, service, max(1, min(limit, 200)))).fetchall()
+        "AND (%s::text[] IS NULL OR COALESCE(s.name, i.service_name) = ANY(%s::text[])) "
+        "ORDER BY i.detected_at DESC LIMIT %s", (status, status, names, names, max(1, min(limit, 200)))).fetchall()
+
+
+def count_by_status(conn, services: list[str]) -> dict[str, int]:
+    """Incidents per status for the named services (exact names); statuses with none are absent."""
+    rows = conn.execute(
+        "SELECT i.status, count(*) AS n FROM incident i LEFT JOIN service s ON s.id = i.service_id "
+        "WHERE COALESCE(s.name, i.service_name) = ANY(%s::text[]) GROUP BY i.status", (list(services),)).fetchall()
+    return {r["status"]: r["n"] for r in rows}
 
 
 def count_incidents(conn, *, status: str | None = None, service: str | None = None) -> int:

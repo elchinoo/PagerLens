@@ -771,3 +771,186 @@ def test_over_real_http_a_gateway_that_rejects_tool_choice_still_answers_and_is_
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+# ---- loose service names: list_incidents / slow_queries resolve what the model typed ------------------------
+
+def seed_fleet(extra_incidents=None):
+    """Services named like the real fleet, with incidents: gotham has an open and a resolved one, metropolis an open one."""
+    ids = {}
+    with connect() as c:
+        for name in ("citypulse-fleet-gotham", "citypulse-fleet-metropolis", "checkout-api", "inventory-api", "billing-worker"):
+            ids[name] = c.execute("INSERT INTO service (name, tier) VALUES (%s, 'tier2') RETURNING id", (name,)).fetchone()["id"]
+        rows = [("citypulse-fleet-gotham", "Gotham sensors offline", "open"), ("citypulse-fleet-gotham", "Gotham old fault", "resolved"),
+                ("citypulse-fleet-metropolis", "Metropolis ingest slow", "open"), ("checkout-api", "Checkout 500s", "open")]
+        for svc, title, status in rows + list(extra_incidents or []):
+            c.execute("INSERT INTO incident (service_id, service_name, title, status, fingerprint, symptom) VALUES (%s,%s,%s,%s,%s,'s')",
+                      (ids[svc], svc, title, status, f"{svc}-{title}"))
+        c.commit()
+    return ids
+
+
+def run_tool(name, **args):
+    with connect_vector() as conn:
+        conn.read_only = True
+        return ask.TOOLS[name][0](conn, **args)
+
+
+def titles(out):
+    return sorted(i["title"] for i in out.data["incidents"])
+
+
+def test_exact_service_name_is_unchanged_and_reports_exact():
+    seed_fleet()
+    out = run_tool("list_incidents", service="citypulse-fleet-gotham")
+    assert titles(out) == ["Gotham old fault", "Gotham sensors offline"]
+    assert out.data["service_resolved"] == {"asked": "citypulse-fleet-gotham", "matched": ["citypulse-fleet-gotham"], "method": "exact"}
+    assert "by_service" not in out.data and "did_you_mean" not in out.data
+
+
+def test_a_prefix_matches_every_service_with_that_prefix_and_labels_each_incident():
+    seed_fleet()
+    out = run_tool("list_incidents", service="CityPulse")                       # case-insensitive
+    res = out.data["service_resolved"]
+    assert res["method"] == "prefix" and res["asked"] == "CityPulse"
+    assert res["matched"] == ["citypulse-fleet-gotham", "citypulse-fleet-metropolis"]
+    assert {i["service"] for i in out.data["incidents"]} == set(res["matched"])
+    assert out.data["by_service"] == {"citypulse-fleet-gotham": 2, "citypulse-fleet-metropolis": 1}
+    assert not any(i["service"] == "checkout-api" for i in out.data["incidents"])
+    assert out.seen["incident"] == {i["id"] for i in out.data["incidents"]}
+
+
+def test_a_substring_matches_when_no_prefix_does():
+    seed_fleet()
+    out = run_tool("list_incidents", service="metropolis")
+    assert out.data["service_resolved"] == {"asked": "metropolis", "matched": ["citypulse-fleet-metropolis"], "method": "substring"}
+    assert titles(out) == ["Metropolis ingest slow"]
+    spaced = run_tool("list_incidents", service="fleet gotham")                  # spaces read as hyphens
+    assert spaced.data["service_resolved"]["method"] == "substring" and spaced.data["service_resolved"]["matched"] == ["citypulse-fleet-gotham"]
+
+
+def test_a_trigram_match_catches_the_question_phrase_and_typos():
+    seed_fleet()
+    out = run_tool("list_incidents", service="citypulse fleet in gotham")
+    res = out.data["service_resolved"]
+    assert res["method"] == "trigram" and res["matched"][0] == "citypulse-fleet-gotham" and len(res["matched"]) <= 5
+    assert "Gotham sensors offline" in titles(out)
+    typo = run_tool("list_incidents", service="checkout-apj")
+    assert typo.data["service_resolved"]["method"] == "trigram" and typo.data["service_resolved"]["matched"][0] == "checkout-api"
+
+
+def test_no_match_returns_no_such_service_with_the_five_closest_names():
+    seed_fleet()
+    with connect() as c:
+        for n in ("a-one", "a-two", "a-three"):
+            c.execute("INSERT INTO service (name) VALUES (%s)", (n,))
+        c.commit()
+    out = run_tool("list_incidents", service="zzqx")
+    assert out.data["incidents"] == [] and out.data["no_such_service"] == "zzqx"
+    assert len(out.data["did_you_mean"]) == 5 and "service_resolved" not in out.data
+    assert out.seen["incident"] == set()
+    near = run_tool("list_incidents", service="billing")                          # still resolvable: no did_you_mean needed
+    assert near.data["service_resolved"]["matched"] == ["billing-worker"] and "no_such_service" not in near.data
+
+
+def test_matches_are_capped_at_five_services():
+    seed_fleet()
+    with connect() as c:
+        for n in range(8):
+            c.execute("INSERT INTO service (name) VALUES (%s)", (f"edge-{n}",))
+        c.commit()
+    out = run_tool("list_incidents", service="edge")
+    assert len(out.data["service_resolved"]["matched"]) == 5 and out.data["service_resolved"]["more_matches"] is True
+
+
+def test_found_service_without_that_status_hints_at_the_statuses_that_have_incidents():
+    seed_fleet()
+    out = run_tool("list_incidents", service="citypulse-fleet-gotham", status="investigating")
+    assert out.data["incidents"] == []
+    assert out.data["did_you_mean"]["other_statuses"] == {"open": 1, "resolved": 1}
+    none = run_tool("list_incidents", service="inventory-api", status="open")      # no incidents at all: nothing to suggest
+    assert none.data["incidents"] == [] and "did_you_mean" not in none.data
+    loose = run_tool("list_incidents", service="citypulse", status="investigating")
+    assert loose.data["did_you_mean"]["other_statuses"] == {"open": 2, "resolved": 1}
+
+
+def test_limits_and_the_read_only_connection_are_unchanged():
+    seed_fleet([("citypulse-fleet-gotham", f"extra {n}", "open") for n in range(30)])
+    out = run_tool("list_incidents", service="citypulse", limit=500)
+    assert len(out.data["incidents"]) == 15                                       # the tool cap, whatever the model asks
+    assert len(run_tool("list_incidents", service="citypulse").data["incidents"]) == 8
+    assert len(ask.fence(out.data)) <= ask.MAX_RESULT_CHARS + len(FENCE_OPEN) + len(FENCE_CLOSE) + 2
+    with connect_vector() as conn:
+        conn.read_only = True
+        ask._resolve_service(conn, "citypulse")
+        with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
+            conn.execute("INSERT INTO service (name) VALUES ('nope')")
+
+
+def test_hostile_service_names_are_data_never_sql():
+    seed_fleet()
+    for evil in ("x'; DROP TABLE service; --", "%", "_", "a\\", "citypulse%' OR '1'='1", "' || (SELECT 1) || '"):
+        out = run_tool("list_incidents", service=evil)
+        assert "incidents" in out.data
+        assert len(out.data["incidents"]) <= 8
+        if "service_resolved" in out.data:                                       # only ever real service names
+            assert set(out.data["service_resolved"]["matched"]) <= {"citypulse-fleet-gotham", "citypulse-fleet-metropolis", "checkout-api",
+                                                                    "inventory-api", "billing-worker"}
+    with connect() as c:
+        assert c.execute("SELECT count(*) AS n FROM service").fetchone()["n"] == 5
+    assert run_tool("list_incidents", service="%").data.get("no_such_service") == "%"      # a wildcard is not a wildcard
+
+
+def test_resolution_sql_is_parameterised_not_built_from_the_argument():
+    import inspect
+
+    src = inspect.getsource(ask._resolve_service) + inspect.getsource(ask._list_incidents) + inspect.getsource(ask._slow_queries)
+    assert "% (" not in src and ".format(" not in src
+    assert not re.search(r"f[\"'][^\"']*\b(?:SELECT|WHERE)[^\"']*\{(?:asked|norm|service|name)\}", src)
+    seen_sql = []
+    with connect_vector() as conn:
+        real = conn.execute
+
+        def spy(query, params=None, **kw):
+            seen_sql.append((str(query), params))
+            return real(query, params, **kw)
+
+        conn.execute = spy
+        ask._resolve_service(conn, "needle-in-sql", legacy=True)
+    assert seen_sql and all("needle-in-sql" not in q and "needle-in-sql" in repr(p) for q, p in seen_sql if p and "needle" in repr(p))
+
+
+def test_slow_queries_resolves_loosely_and_reports_no_such_service():
+    seed_fleet()
+    one = run_tool("slow_queries", service="checkout")
+    assert one.data["service_resolved"]["matched"] == ["checkout-api"] and "queries" in one.data
+    many = run_tool("slow_queries", service="citypulse")
+    assert [p["service"] for p in many.data["services"]] == ["citypulse-fleet-gotham", "citypulse-fleet-metropolis"]
+    none = run_tool("slow_queries", service="zzqx")
+    assert none.data["no_such_service"] == "zzqx" and len(none.data["did_you_mean"]) == 5 and "error" in none.data
+
+
+def test_the_system_prompt_teaches_slugs_and_the_resolution_fields():
+    for word in ("exact slugs", "list_services", "service_resolved", "did_you_mean", "no_such_service"):
+        assert word in ask.SYSTEM
+
+
+def test_asking_about_the_citypulse_fleet_in_gotham_ends_grounded_with_an_incident_citation(admin, monkeypatch):
+    seed_fleet()
+
+    def script(messages, tools, n):
+        if n == 1:       # what the live model did: the loose name 'citypulse' for each status
+            return {"tool_calls": [tool_call("list_incidents", {"service": "citypulse", "status": "open"}, 1)]}
+        listing = results(messages, "list_incidents")[-1]
+        assert listing["service_resolved"]["matched"] == ["citypulse-fleet-gotham", "citypulse-fleet-metropolis"]
+        if n == 2:
+            return {"tool_calls": [tool_call("list_incidents", {"service": "citypulse fleet in gotham"}, 2)]}
+        gotham = [i for i in listing["incidents"] if i["service"] == "citypulse-fleet-gotham" and i["status"] == "open"]
+        assert gotham and listing["service_resolved"]["method"] == "trigram"
+        return {"text": f"In gotham, citypulse-fleet-gotham has an open incident: {gotham[0]['title']} {gotham[0]['cite']}."}
+
+    seen = install(monkeypatch, script)
+    out = ask_api(admin, "What happened with the citypulse fleet in gotham?").json()
+    assert out["grounded"] is True and out["corrected"] is False and not out["unverified"], out
+    assert [s["type"] for s in out["sources"]] == ["incident"] and "Gotham sensors offline" in out["sources"][0]["label"]
+    assert len(seen) == 3 and not out["warnings"]
