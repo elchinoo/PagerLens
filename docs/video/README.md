@@ -20,7 +20,7 @@ password is random per run and never shown).
 ## What it does
 
 1. `narration.py audio`: runs the shared Kokoro narrator (`videos/tts/narrate.py scenes narration.txt ... --pronounce pronounce.json
-   --voice af_bella`) on `narration.txt`, the narration written for listening. The `## <scene> <voice>` headers pick the voice:
+   --voice am_liam`) on `narration.txt`, the narration written for listening. The `## <scene> <voice>` headers pick the voice:
    one voice per scene, alternating male and female (am_liam, af_heart, am_eric, af_heart, am_liam, af_heart, am_eric, af_heart, am_liam, af_heart, am_eric, af_heart, am_liam; three voices, one US accent) at speed 1.08, with acronyms sounded out by `pronounce.json` (hyphenated forms such as ay-pee-eye). It writes one wav per scene and `narration.json` with the length and the per-sentence cues of every scene.
    The audio is reused when `narration.txt` and `pronounce.json` have not changed (`FORCE_TTS=1` speaks it again).
 2. A private Playwright browsers directory under `$WORK` makes Playwright's video recorder use your ffmpeg (`FFMPEG`, default the
