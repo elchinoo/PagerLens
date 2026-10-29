@@ -1,4 +1,4 @@
-## 1 af_bella
+## 1 am_liam
 It is three in the morning. Checkout is failing.
 
 Your logs are in one tool, your metrics in another, and your runbooks in a wiki.
@@ -9,7 +9,7 @@ You need the likely cause in minutes. And you want the next incident to learn fr
 
 Here is how Postgres on AgentPG does that.
 
-## 2 am_michael
+## 2 af_heart
 Who is who? PagerLens is the sample app.
 
 Three things around it are scaffolding you can swap: sign-in, the model gateway, and the secret vault.
@@ -22,7 +22,7 @@ The vault is one small module of the shared kit. Its key comes from the platform
 
 The platform part is Postgres on AgentPG, with its extensions.
 
-## 3 af_heart
+## 3 am_eric
 Now the problem itself. This is the Lab, a simulator. It can break a fictional shop in ten ways.
 
 I pick a bad release, and press Break it.
@@ -39,7 +39,7 @@ Metrics against a baseline. Grouped errors. Recent deploys. And slow queries.
 
 Every step is recorded in the run viewer. The answer is a ranked list of causes.
 
-## 4 am_eric
+## 4 af_heart
 Why trust the top answer?
 
 It says a release was deployed just before the errors began.
@@ -54,7 +54,7 @@ Log text is untrusted. PagerLens shows it, and never obeys it.
 
 Below is the report, in Markdown, ready for a ticket. The runbook steps are only suggestions. PagerLens cannot restart or roll back anything.
 
-## 5 af_sarah
+## 5 am_liam
 Now the same incident, with a language model.
 
 The method is Rules plus AI. The model drives the same read-only tools.
@@ -71,7 +71,22 @@ Both answers blame the release, so confidence goes up. Anything the model claims
 
 We have not measured accuracy on live models.
 
-## 6 am_adam
+## 6 af_heart
+You can also just ask. This is Ask PagerLens, a chat in plain English.
+
+The model is the same stand-in, labelled on screen. It is not a real model.
+
+I pick a suggested question. Why is checkout-api failing?
+
+PagerLens looks things up with read-only tools. It opens the incident, reads the evidence, and searches the runbooks.
+
+Here is the answer, with a Verified badge.
+
+Every citation was checked against the database. It exists, and the model really read it. Only verified sources become chips.
+
+Live answers come from the real model, and are checked the same way. Verified does not prove a sentence is right, so a person still reads the source.
+
+## 7 am_eric
 Now, the next incident should learn from this one.
 
 I confirm the real cause, a bad deploy, and add a note.
@@ -86,7 +101,7 @@ The new report lists the earlier incident, and the cause a person confirmed.
 
 Nothing is learned from guesses. How does that lookup work?
 
-## 7 af_bella
+## 8 af_heart
 Under the hood. This is the memory lookup, as plain sequel.
 
 It sorts resolved incidents by cosine distance, with the pgvector operator.
@@ -101,7 +116,7 @@ Runbooks use a hybrid search. One query runs full-text search and vector search,
 
 Here is the real result, for the question: checkout errors after a release.
 
-## 8 am_michael
+## 9 am_liam
 Next, live updates. The incident list should change by itself.
 
 The tcn extension makes Postgres send a notification whenever an incident or an alert changes.
@@ -122,7 +137,7 @@ Watch the list. I send an alert for another service.
 
 The new incident appears by itself.
 
-## 9 af_heart
+## 10 af_heart
 Now a quieter failure. No deploy, no outage. One query got slower.
 
 Every app on the kit exports a gauge of its slowest statements. On AgentPG it comes from edb_stat_monitor.
@@ -139,7 +154,7 @@ The evidence names the query, with its mean before and now.
 
 The statement text itself is in the Database tab, under that query id.
 
-## 10 am_eric
+## 11 am_eric
 Now, who may read this data? An assistant should see incidents, but not personal data or secrets.
 
 On AgentPG, a read-only user comes from one command. It is a member of a read-only group role. Locally, I created a role set up the same way.
@@ -154,7 +169,7 @@ And the tables with secrets, like token hashes, are denied, with no view at all.
 
 Postgres enforces this, not the application code.
 
-## 11 af_sarah
+## 12 af_heart
 One more place to look: the Database tab.
 
 On this local Postgres it shows only pg_stat_statements, the top statements.
@@ -169,7 +184,7 @@ And query_advisor already suggests an index for the alert table.
 
 It only suggests. Nothing is changed.
 
-## 12 am_adam
+## 13 am_liam
 Try it yourself. Three commands: migrate, seed, serve.
 
 Then open the Lab, and press Break it.

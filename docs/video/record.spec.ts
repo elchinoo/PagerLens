@@ -5,7 +5,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import * as os from 'node:os';
 
 /**
- * Records the on-screen part of the PagerLens customer video (docs/VIDEO-SCRIPT.md, scenes 1 to 12) with Playwright video.
+ * Records the on-screen part of the PagerLens customer video (docs/VIDEO-SCRIPT.md, scenes 1 to 13) with Playwright video.
  *
  * Problem first: a 3 a.m. incident, who-is-who (platform, scaffolding, sample app), the core investigation, then UNDER THE HOOD:
  * the real SQL of incident memory and runbook search, live updates with tcn, the slow query finding, database-enforced masking and
@@ -34,7 +34,7 @@ const OUT = process.env.OUT_DIR || path.join(__dirname, 'out');
 // NARRATION_TIMING=<timing.json>; without it every scene lasts the table's length. PACE_FILE=<json {scene: factor}> stretches
 // (>1) or compresses (<1) the pauses of one scene so its actions end when its narration does (see docs/video/README.md).
 const LEAD = 0.2;      // seconds after the scene start before the narration starts (narration.py LEAD_IN)
-const TAIL = 1.0;      // seconds of picture after the narration ends (the scene lasts at least audio + 0.7 s)
+const TAIL = 0.5;      // seconds of picture after the narration ends: the scene lasts exactly audio + 0.7 s (LEAD + TAIL)
 const mouse = { x: SIZE_W() / 2, y: 600 };   // where the cursor is, so idle time can drift it a little (a still picture tires the eye)
 function SIZE_W() { return 1920; }
 const TIMING: Record<string, { voice: string; duration: number; cues: { text: string; start: number; end: number }[] }> =
@@ -333,7 +333,7 @@ async function scene(page: Page, n: number, name: string, seconds: number, body:
   const waitUntil = async (secs: number, label = '') => {
     const wait = secs * 1000 * PACE - (Date.now() - t0);
     if (wait > 0) await idle(page, wait);
-    else if (label && wait < -1500 * PACE) console.warn(`[recorder]   scene ${n}: ${label} is ${(-wait / 1000 / PACE).toFixed(1)} s late (lower this scene's factor in pace.json)`);
+    else if (label && wait < -250 * PACE) console.warn(`[recorder]   scene ${n}: LATE ${(-wait / 1000 / PACE).toFixed(1)} s: ${label} (the action before it ran past this sentence; lower this scene's factor in pace.json or start it earlier)`);
   };
   await body({
     // wait for the start of the spoken sentence that contains `cue` (text of narration.txt); a wrong anchor fails the run
@@ -518,9 +518,9 @@ test('record the PagerLens customer video', async ({ browser, playwright, contex
   await page.goto('/#dashboard');
   await expect(page.locator('.svc-card')).toHaveCount(5);
   await R('title', ['PagerLens', 'Find the likely cause in minutes, and let the next incident learn: a sample app on Postgres with AgentPG']);
-  await page.waitForTimeout(3500 * PACE);
+  await page.waitForTimeout(2500 * PACE);
   await R('clearTitle');
-  sceneLog['0'] = { start: tTitle / 1000, end: Date.now() / 1000, natural: 0, hold: 3.5, pace: 1 };
+  sceneLog['0'] = { start: tTitle / 1000, end: Date.now() / 1000, natural: 0, hold: 2.5, pace: 1 };
 
   // ---- 1  The problem -------------------------------------------------------------------------------------------------
   await scene(page, 1, 'The problem', 20, async (b) => {
@@ -594,7 +594,7 @@ test('record the PagerLens customer video', async ({ browser, playwright, contex
     await callout(page, page.getByText('slow_queries').first(), 'The new slow_queries step', 2600, 'right');
     await b.at('The answer is a ranked list');
     await reveal(page, hypotheses.locator('article.hyp').first(), [200, 600]);
-    await callout(page, hypotheses.getByRole('heading', { name: 'Hypotheses' }), 'Ranked, each with a score', 2500, 'right');
+    await callout(page, hypotheses.getByRole('heading', { name: 'Hypotheses' }), 'Ranked, each with a score', 1500, 'right');
   });
   const firstIncidentUrl = page.url();
   await expect(hypotheses.locator('article.hyp h3').first()).toContainText(/Release .* introduced the failure|deploy/i);
@@ -657,9 +657,44 @@ test('record the PagerLens customer video', async ({ browser, playwright, contex
   });
   await expect(hypotheses.locator('article.hyp').first().locator('.badge.src')).toContainText(/Rules \+ AI|both/i);
 
-  // ---- 6  Memory: confirm the cause, break again, recalled --------------------------------------------------------------
-  await scene(page, 6, 'Close the loop and recall', 45, async (b) => {
+  // ---- 6  Ask PagerLens: a question in plain English, answered with verified citations (stand-in model) --------------------------
+  await scene(page, 6, 'Ask PagerLens (stand-in model)', 55, async (b) => {
+    await b.at('You can also just ask');
+    await click(page, nav('ask'), 300, 500);
+    await expect(page.getByRole('heading', { name: 'Ask PagerLens' })).toBeVisible();
+    await expect(page.locator('#ask-notice .banner')).toHaveCount(0);   // a chat account is configured (the stand-in)
+    await b.at('The model is the same stand-in');
+    await lowerThird(page, 'DEMO STAND-IN model (scripts/fake_llm.py), not a real model');
+    await b.at('I pick a suggested question');
+    const q = page.getByRole('button', { name: 'Why is checkout-api failing?' });
+    await glide(page, q);
+    await pause(page, 300);
+    await q.click();
+    await b.at('PagerLens looks things up');
+    const verdict = page.locator('#ask-log .badge.verdict');
+    await expect(verdict).toBeVisible({ timeout: 30_000 });   // the answer has arrived
+    await b.at('Here is the answer');
+    await expect(verdict).toHaveText('Verified');
+    await callout(page, verdict, 'Verified: every citation exists and was read', 2400, 'right');
+    await b.at('Every citation was checked');
+    const sources = page.locator('#ask-log ul.sources');
+    await expect(sources.locator('li')).not.toHaveCount(0);
+    const refs = await sources.locator('.chip-ref').allInnerTexts();
+    console.log(`[recorder] verified sources: ${refs.join(', ')}`);
+    expect(refs.some((r) => /incident #\d+/i.test(r)), 'the answer cites an incident').toBeTruthy();
+    expect(await page.locator('#ask-log .unverified').count(), 'no unverified citation').toBe(0);
+    await callout(page, sources, 'Verified sources, checked against the database', 3000, 'below');
+    await b.at('Live answers come from the real model');
+    await lowerThird(page, 'Live answers come from the real model; the stand-in only fills a template');
+    await b.endOfNarration();
+    await lowerThird(page, null);
+  });
+
+  // ---- 7  Memory: confirm the cause, break again, recalled --------------------------------------------------------------
+  await scene(page, 7, 'Close the loop and recall', 45, async (b) => {
     const closing = page.getByRole('heading', { name: 'Close the loop' });
+    await page.goto(firstIncidentUrl);   // back from the Ask tab to the first incident
+    await expect(closing).toBeVisible();
     await b.at('Now, the next incident should learn');
     await reveal(page, closing, [200, 400]);
     await expect(page.locator('#rc-cat')).toHaveValue('bad_deploy');
@@ -691,8 +726,8 @@ test('record the PagerLens customer video', async ({ browser, playwright, contex
   const newId = Number(psqlValue('SELECT max(id) FROM incident'));
   expect(newId).toBeGreaterThan(1);
 
-  // ---- 7  Under the hood: incident memory (pgvector, HNSW) and runbook hybrid search ----------------------------------------
-  await scene(page, 7, 'Under the hood: pgvector and hybrid search', 60, async (b) => {
+  // ---- 8  Under the hood: incident memory (pgvector, HNSW) and runbook hybrid search ----------------------------------------
+  await scene(page, 8, 'Under the hood: pgvector and hybrid search', 60, async (b) => {
     const D = 28;
     await b.at('Under the hood');
     await termOpen(page, 'Incident memory: SQL from src/pagerlens/retrieval.py (abridged), output from a real psql run',
@@ -763,8 +798,8 @@ test('record the PagerLens customer video', async ({ browser, playwright, contex
     await termClose(page);
   });
 
-  // ---- 8  Live updates with tcn -----------------------------------------------------------------------------------------
-  await scene(page, 8, 'tcn live updates', 50, async (b) => {
+  // ---- 9  Live updates with tcn -----------------------------------------------------------------------------------------
+  await scene(page, 9, 'tcn live updates', 50, async (b) => {
     const D = 30;
     const alertBody = (service: string) => ({ service, name: 'HighErrorRate', summary: '5xx above 5%', severity: 'sev2' });
     const curl = (service: string) => `$ curl -sS -X POST ${BASE}/api/ingest/alerts \\\n    -H "Authorization: Bearer $PAGERLENS_TOKEN" -H "Content-Type: application/json" \\\n    -d '${JSON.stringify(alertBody(service))}'`;
@@ -823,12 +858,12 @@ test('record the PagerLens customer video', async ({ browser, playwright, contex
     console.log(`[recorder] the new row appeared ${(Date.now() - tPost) / 1000} s after the alert, with no reload`);
     expect(Date.now() - tPost).toBeLessThan(6000);
     await b.at('The new incident appears by itself');
-    await callout(page, row, 'Appeared by itself: no reload, no polling', 3000, 'above');
+    await callout(page, row, 'Appeared by itself: no reload, no polling', 2000, 'above');
     await b.endOfNarration();
   });
 
-  // ---- 9  The slow query story (dogfooding) -----------------------------------------------------------------------------
-  await scene(page, 9, 'Slow query', 60, async (b) => {
+  // ---- 10  The slow query story (dogfooding) -----------------------------------------------------------------------------
+  await scene(page, 10, 'Slow query', 60, async (b) => {
     const D = 30;
     await b.at('Now a quieter failure');
     await click(page, nav('lab'), 300, 400);
@@ -875,12 +910,12 @@ test('record the PagerLens customer video', async ({ browser, playwright, contex
     await b.at('The statement text itself');
     await click(page, nav('insights'), 300, 600);
     await expect(page.locator('#view-insights')).toContainText(/pg_stat_statements/, { timeout: 15_000 });
-    await callout(page, page.locator('#view-insights table').first(), 'Statement text, by queryid', 3000, 'above');
+    await callout(page, page.locator('#view-insights table').first(), 'Statement text, by queryid', 2000, 'above');
     await b.endOfNarration();
   });
 
-  // ---- 10  Database-enforced masking for a read-only user -------------------------------------------------------------------
-  await scene(page, 10, 'Masking for a read-only user', 50, async (b) => {
+  // ---- 11  Database-enforced masking for a read-only user -------------------------------------------------------------------
+  await scene(page, 11, 'Masking for a read-only user', 50, async (b) => {
     const D = 35;
     const owner = await playwright.request.newContext({ storageState: state, extraHTTPHeaders: CSRF });
     const note = await owner.post(`${BASE}/api/incidents/${newId}/notes`, { data: { body: 'Paged jordan.rivera@example.com, rollback in progress' } });
@@ -931,8 +966,8 @@ test('record the PagerLens customer video', async ({ browser, playwright, contex
     await termClose(page);
   });
 
-  // ---- 11  Database insights: local pg_stat_statements, REAL captured output from the AgentPG fleet ------------------------
-  await scene(page, 11, 'Database insights', 50, async (b) => {
+  // ---- 12  Database insights: local pg_stat_statements, REAL captured output from the AgentPG fleet ------------------------
+  await scene(page, 12, 'Database insights', 50, async (b) => {
     const D = 25;
     const exts = captureBlock(readCapture('extensions-installed.txt'), '# pagerlens (');
     const recs = captureBlock(readCapture('ecoctl-insights.txt'), 'pagerlens (');
@@ -965,9 +1000,9 @@ test('record the PagerLens customer video', async ({ browser, playwright, contex
     await termClose(page);
   });
 
-  // ---- 12  Try it yourself ----------------------------------------------------------------------------------------------
-  await scene(page, 12, 'Try it yourself', 25, async (b) => {
-    await click(page, nav('dashboard'), 100, 100);
+  // ---- 13  Try it yourself ----------------------------------------------------------------------------------------------
+  await scene(page, 13, 'Try it yourself', 25, async (b) => {
+    await page.evaluate(() => { location.hash = '#dashboard'; });
     await b.at('Try it yourself');
     await termOpen(page, 'Try it yourself (shown, not run)', 'from docs/GUIDE.md', '#58a6ff', 28);
     await typeInTerm(page, '', [

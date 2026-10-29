@@ -1,6 +1,6 @@
 # PagerLens customer video (problem first): build
 
-One command builds the review cut of the customer video (narrated, captioned mp4, about 7 and a half minutes) from `docs/VIDEO-SCRIPT.md` and the recorder
+One command builds the review cut of the customer video (narrated, captioned mp4, about 7 minutes) from `docs/VIDEO-SCRIPT.md` and the recorder
 `record.spec.ts`:
 
 ```bash
@@ -21,8 +21,7 @@ password is random per run and never shown).
 
 1. `narration.py audio`: runs the shared Kokoro narrator (`videos/tts/narrate.py scenes narration.txt ... --pronounce pronounce.json
    --voice af_bella`) on `narration.txt`, the narration written for listening. The `## <scene> <voice>` headers pick the voice:
-   scenes 1-2 af_bella, 3-4 am_michael, 5-6 af_heart, 7-8 am_eric, 9-12 af_sarah (one voice per topic, alternating female and male,
-   one US accent). It writes one wav per scene and `narration.json` with the length and the per-sentence cues of every scene.
+   one voice per scene, alternating male and female (am_liam, af_heart, am_eric, af_heart, am_liam, af_heart, am_eric, af_heart, am_liam, af_heart, am_eric, af_heart, am_liam; three voices, one US accent) at speed 1.08, with acronyms sounded out by `pronounce.json` (hyphenated forms such as ay-pee-eye). It writes one wav per scene and `narration.json` with the length and the per-sentence cues of every scene.
    The audio is reused when `narration.txt` and `pronounce.json` have not changed (`FORCE_TTS=1` speaks it again).
 2. A private Playwright browsers directory under `$WORK` makes Playwright's video recorder use your ffmpeg (`FFMPEG`, default the
    one on PATH) instead of its own build; `npx playwright install` is not needed.
@@ -30,7 +29,7 @@ password is random per run and never shown).
    for AgentPG's read-only role (group role `a1p_readonly` with default SELECT on new tables, and the login role `pl_reader` in it),
    `migrate` (which applies `hardening.py`), `seed`, stand-in model, `pagerlens serve`, on
    loopback ports `BASE_PORT+1` to `+3` (default 41401 to 41403; the terminal cards run real `psql` against that Postgres). A fresh database for every build.
-4. `record.spec.ts` (1920x1080, full pace, `PACE=1`): every scene is held for its narration plus 1.2 s, and the actions inside a
+4. `record.spec.ts` (1920x1080, full pace, `PACE=1`): every scene is held for its narration plus 0.7 s, and the actions inside a
    scene are anchored to the sentence they illustrate (`b.at('text of the sentence')`; a sentence that is not in `narration.txt`
    fails the run, so the two cannot drift apart). Long sentences get gentle scrolling so no picture sits still. It writes `pagerlens-tutorial.webm` and `scenes.json` (scene start times).
 5. `narration.py mux`: places each scene's audio at its recorded start (the video's time zero is read from the moment the title card
