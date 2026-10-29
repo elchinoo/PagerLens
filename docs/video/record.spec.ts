@@ -899,7 +899,7 @@ test('record the PagerLens customer video', async ({ browser, playwright, contex
     const top = hypotheses.locator('article.hyp').first();
     await reveal(page, top, [200, 520]);
     await expect(top.locator('h3').first()).toContainText(/slower/);
-    await callout(page, top.locator('h3').first(), 'Top cause: Slow query', 2600, 'below');
+    await callout(page, top.locator('h3').first(), 'Top cause: Slow query', 2600, 'above');
     await b.at('The evidence names the query');
     const evText = await top.innerText();
     const ev = evText.match(/query \S+ on inventory-api: mean [\d.]+ ms before, [\d.]+ ms now \(x[\d.]+\)/);

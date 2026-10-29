@@ -1,7 +1,21 @@
 {
-  "AI": "ay-eye", "checkout-api": "checkout ay-pee-eye", "payments-gateway": "payments gateway", "inventory-api": "inventory ay-pee-eye",
-  "OpenTelemetry": "Open Telemetry", "VS Code": "vee-ess Code", "Postgres": "Post-gres", "Markdown": "Mark-down",
-  "tcn": "tee-see-en", "EDB": "ee-dee-bee", "edb_stat_monitor": "ee-dee-bee stat monitor", "edb_pg_tuner": "ee-dee-bee pee-gee tuner",
-  "query_advisor": "query advisor", "pg_stat_statements": "pee-gee stat statements", "HNSW": "aych-en-ess-double-you",
-  "OpenID": "Open eye-dee", "psql": "pee-sequel", "pgvector": "pee-gee vector", "OpenAI-compatible": "Open ay-eye compatible", "AgentPG": "agent pee-gee"
+ "checkout-api": "checkout API",
+ "payments-gateway": "payments gateway",
+ "inventory-api": "inventory API",
+ "OpenTelemetry": "Open Telemetry",
+ "VS Code": "vee-ess Code",
+ "Postgres": "Post-gres",
+ "Markdown": "Mark-down",
+ "tcn": "tee-see-en",
+ "EDB": "ee-dee-bee",
+ "edb_stat_monitor": "ee-dee-bee stat monitor",
+ "edb_pg_tuner": "ee-dee-bee pee-gee tuner",
+ "query_advisor": "query advisor",
+ "pg_stat_statements": "pee-gee stat statements",
+ "HNSW": "H N S W",
+ "OpenID": "Open eye-dee",
+ "psql": "pee-sequel",
+ "pgvector": "pee-gee vector",
+ "AgentPG": "agent pee-gee",
+ "OpenAI-compatible": "OpenAI compatible"
 }
