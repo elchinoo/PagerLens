@@ -1,0 +1,2 @@
+# Vulnerabilities that CI's blocking pip-audit step must not fail on. One per line: <ID> <reason and review date>.
+# A line without a reason fails the job. Keep this empty unless there is no fixed version yet.

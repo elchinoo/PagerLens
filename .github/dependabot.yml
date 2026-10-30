@@ -6,6 +6,9 @@ updates:
   - package-ecosystem: pip
     directory: /
     schedule: {interval: weekly}
+  - package-ecosystem: pip
+    directory: /requirements
+    schedule: {interval: weekly}
   - package-ecosystem: docker
     directory: /
     schedule: {interval: weekly}

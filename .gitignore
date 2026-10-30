@@ -14,3 +14,6 @@ api_key
 agent.yaml
 docs/video/out/
 docs/video/node_modules
+.ecosystem/
+!.env.*example
+*.dbkey

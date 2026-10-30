@@ -8,3 +8,12 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 tests/
+.env.*
+*.key
+*.pem
+*.dbkey
+api_key
+state.json
+.ecosystem/
+docs/
+requirements/relock.sh

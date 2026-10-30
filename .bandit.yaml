@@ -1,0 +1,5 @@
+# bandit -r src -ll -c .bandit.yaml   (CI job is non-blocking; this keeps the signal readable)
+skips:
+  - B101  # assert: used for invariants and in pytest-style helpers
+  - B104  # bind to 0.0.0.0: the deliberate container default (HOST is configurable); the kit refuses an unauthenticated public bind
+  - B608  # SQL built from f-strings: noise here; statements compose code-defined identifiers and placeholders, values are bound

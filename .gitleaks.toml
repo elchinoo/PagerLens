@@ -1,0 +1,117 @@
+# Secret scanning for the AgentPG ecosystem repositories (gitleaks, https://github.com/gitleaks/gitleaks).
+# The same file lives in every repository. All tokens minted by our apps are secrets.token_urlsafe(32) (43 characters of
+# [A-Za-z0-9_-]) behind a short prefix; refresh tokens are token_urlsafe(40) (54 characters).
+title = "agentpg ecosystem"
+
+[extend]
+useDefault = true
+
+# --- Our token shapes ------------------------------------------------------------------------------------------------
+
+[[rules]]
+id = "eco-client-secret"
+description = "Identity OIDC client secret, or CityPulseSimulator API token (cs_ prefix)"
+regex = '''\bcs_[A-Za-z0-9_-]{43}\b'''
+keywords = ["cs_"]
+
+[[rules]]
+id = "eco-gateway-client-key"
+description = "LLM gateway client key (lg_)"
+regex = '''\blg_[A-Za-z0-9_-]{43}\b'''
+keywords = ["lg_"]
+
+[[rules]]
+id = "eco-app-api-token"
+description = "Per-app API token: identity idt_, gateway lgt_, TrustDesk td_, PagerLens pl_, PayBroker pbt_, ShopFront sft_, CityPulse cp_"
+regex = '''\b(?:idt|lgt|td|pl|pbt|sft|cp)_[A-Za-z0-9_-]{43}\b'''
+keywords = ["idt_", "lgt_", "td_", "pl_", "pbt_", "sft_", "cp_"]
+
+[[rules]]
+id = "eco-paybroker-merchant-key"
+description = "PayBroker merchant key (sk_/pk_ test or live)"
+regex = '''\b(?:sk|pk)_(?:test|live)_[A-Za-z0-9_-]{43}\b'''
+keywords = ["sk_test_", "pk_test_", "sk_live_", "pk_live_"]
+
+[[rules]]
+id = "eco-webhook-secret"
+description = "PayBroker webhook signing secret (whsec_)"
+regex = '''\bwhsec_[A-Za-z0-9_-]{43}\b'''
+keywords = ["whsec_"]
+
+[[rules]]
+id = "eco-refresh-token"
+description = "Identity refresh token (rt_)"
+regex = '''\brt_[A-Za-z0-9_-]{54}\b'''
+keywords = ["rt_"]
+
+[[rules]]
+id = "eco-bare-43char-secret"
+description = "A 43-character urlsafe value assigned to a key, secret, token or password"
+regex = '''(?i)(?:key|secret|token|password)\w*["']?\s*[:=]\s*["'][A-Za-z0-9_-]{43}["']'''
+keywords = ["key", "secret", "token", "password"]
+
+[[rules]]
+id = "eco-env-assignments"
+description = "Long value assigned to an *_ENCRYPTION_KEY, *_API_KEY or *_CLIENT_SECRET variable"
+regex = '''(?i)\b[A-Z0-9_]*(?:ENCRYPTION_KEY|API_KEY|CLIENT_SECRET)\s*[=:]\s*["']?[^\s"'$<{]{16,}'''
+keywords = ["encryption_key", "api_key", "client_secret"]
+
+[[rules]]
+id = "eco-jwt"
+description = "JSON Web Token (three base64url segments, header starting eyJ)"
+regex = '''\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b'''
+keywords = ["eyj"]
+
+[[rules]]
+id = "eco-pem-private-key"
+description = "PEM private key block"
+regex = '''-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----'''
+keywords = ["private key"]
+
+[[rules]]
+id = "eco-dsn-with-password"
+description = "Database URL with an embedded password"
+regex = '''postgres(?:ql)?://[^:\s/@"']+:[^@\s"'$<{]{6,}@'''
+keywords = ["postgres://", "postgresql://"]
+
+# --- Known test values ------------------------------------------------------------------------------------------------
+# Keep these narrow. A real secret must never be allow-listed by a broad path or regex.
+
+[[allowlists]]
+description = "Lines carrying the repository's own marker (detect-secrets style) are reviewed test values"
+regexTarget = "line"
+regexes = ['''pragma: allowlist secret''']
+
+[[allowlists]]
+description = "Documented placeholders and throwaway values in docs and CI"
+regexes = [
+  '''sk-upstream-SECRET''',
+  '''ci-throwaway''',
+  ''':(?:local-only|devonly|nothing|adminpw)@''',
+  '''://(?:user:password|postgres:postgres)@''',
+]
+
+[[allowlists]]
+description = "Example environment files hold placeholders only"
+paths = ['''(^|/)\.env\.(?:[a-z.]*\.)?example$''']
+
+# Tests, the e2e suite and the video scripts use fake keys, fake DSNs and fake tokens on purpose. They are exempt from the
+# generic and pattern-less rules only: the strict token-shape rules (cs_, lg_, idt_, sk_test_, whsec_, rt_, ...) and every
+# vendor rule with a checksum or fixed prefix still apply there, so a real-looking token committed to a test is reported.
+[[allowlists]]
+description = "Fake credentials in tests, e2e suite and video scripts"
+targetRules = [
+  "generic-api-key", "stripe-access-token", "curl-auth-header", "aws-access-token", "jwt",
+  "eco-env-assignments", "eco-jwt", "eco-pem-private-key", "eco-dsn-with-password", "eco-bare-43char-secret",
+]
+paths = [
+  '''(^|/)tests?/''',
+  '''(^|/)e2e/''',
+  '''(?i)^docs/video''',
+  '''(?i)^docs/[^/]*video[^/]*\.md$''',
+]
+
+[[allowlists]]
+description = "PagerLens simulator metric names (latency_p95 and similar) trip the generic-api-key entropy rule"
+targetRules = ["generic-api-key"]
+paths = ['''^src/pagerlens/simulator\.py$''']
