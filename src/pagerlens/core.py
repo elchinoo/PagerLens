@@ -13,6 +13,7 @@ from apgkit.netguard import NetGuard
 from apgkit.vault import Vault
 
 from . import __version__
+from .config import bind_host
 
 APP = "pagerlens"
 COOKIE = "pl_session"
@@ -22,6 +23,13 @@ db = Database(vector=True)
 vault = Vault("PAGERLENS")
 netguard = NetGuard("PAGERLENS_ALLOW_PRIVATE_LLM_URLS")
 llm = LLMClient(netguard, vault)
+# Every encrypted column is registered so `rotate_data_key` re-encrypts it, bound to its own row (the context is what the code
+# passes to encrypt/decrypt: see accounts.key_context).
+vault.register_store(
+    "llm_account.api_key_enc",
+    "SELECT id, api_key_enc AS value FROM llm_account WHERE api_key_enc IS NOT NULL",
+    "UPDATE llm_account SET api_key_enc = %(value)s WHERE id = %(id)s",
+    context="llm_account.api_key_enc:{id}")
 metrics = metrics_mod.Metrics(APP, __version__)
 
 ALL = frozenset({"*"})
@@ -62,5 +70,5 @@ def _on_reset(conn) -> None:
 local = LocalAuth(APP_AUTH, env_prefix="PAGERLENS", token_prefix="pl_", token_scopes={"read", "ingest", "metrics", "full"}, vault=vault,
                   on_reset=_on_reset)
 auth = Authenticator(APP_AUTH, local, db, cookie_name=COOKIE, verifier=fed.verifier,
-                     allow_anonymous=lambda: env_bool("PAGERLENS_ALLOW_ANONYMOUS"))
+                     allow_anonymous=lambda: env_bool("PAGERLENS_ALLOW_ANONYMOUS"), bind_host=bind_host())
 public_url_env = "PAGERLENS_PUBLIC_URL"

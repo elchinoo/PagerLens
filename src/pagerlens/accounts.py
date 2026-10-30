@@ -37,6 +37,11 @@ class AccountError(ValueError):
     pass
 
 
+def key_context(account_id: int) -> str:
+    """Binds a stored provider key to its own row: a ciphertext copied to another account (or column) will not decrypt."""
+    return f"llm_account.api_key_enc:{account_id}"
+
+
 @dataclass(frozen=True)
 class ChatConfig:
     base_url: str
@@ -45,9 +50,10 @@ class ChatConfig:
     label: str
     key_plain: str = ""
     key_enc: str | None = None
+    key_context: str = ""
 
     def api_key(self) -> str:
-        return vault.decrypt(self.key_enc) if self.key_enc else self.key_plain
+        return vault.decrypt_compat(self.key_enc, self.key_context) if self.key_enc else self.key_plain
 
 
 _PUBLIC = ("id, name, provider, base_url, (api_key_enc IS NOT NULL) AS has_key, api_key_last4, chat_model, "
@@ -93,17 +99,18 @@ def create(conn, *, name: str, provider: str, base_url: str, api_key: str | None
         raise AccountError("unknown provider")
     base_url = check_url(base_url)
     enc = last4 = None
+    new_id = conn.execute("SELECT nextval(pg_get_serial_sequence('llm_account', 'id')) AS id").fetchone()["id"]
     if _clean(api_key):
         _require_vault(conn)
         key = api_key.strip()
-        enc, last4 = vault.encrypt(key), key[-4:]
+        enc, last4 = vault.encrypt(key, key_context(new_id)), key[-4:]
     exists = conn.execute("SELECT 1 FROM llm_account WHERE lower(name)=lower(%s)", (name,)).fetchone()
     if exists:
         raise AccountError("an account with that name already exists")
     row = conn.execute(
-        "INSERT INTO llm_account (name, provider, base_url, api_key_enc, api_key_last4, chat_model, embedding_model, "
-        "embedding_dim) VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-        (name, provider, base_url, enc, last4, _clean(chat_model), _clean(embedding_model), embedding_dim),
+        "INSERT INTO llm_account (id, name, provider, base_url, api_key_enc, api_key_last4, chat_model, embedding_model, "
+        "embedding_dim) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+        (new_id, name, provider, base_url, enc, last4, _clean(chat_model), _clean(embedding_model), embedding_dim),
     ).fetchone()
     conn.commit()
     return row["id"]
@@ -125,7 +132,7 @@ def update(conn, account_id: int, *, name: str, provider: str, base_url: str, ap
         _require_vault(conn)
         key = api_key.strip()
         sets += ["api_key_enc=%s", "api_key_last4=%s"]
-        args += [vault.encrypt(key), key[-4:]]
+        args += [vault.encrypt(key, key_context(account_id)), key[-4:]]
     elif clear_key:
         sets += ["api_key_enc=NULL", "api_key_last4=NULL"]
     conn.execute(f"UPDATE llm_account SET {', '.join(sets)} WHERE id=%s", (*args, account_id))
@@ -157,7 +164,8 @@ def embedding_config_for(conn, account_id: int) -> embedcfg.EmbeddingConfig:
     s = get_settings()
     return embedcfg.EmbeddingConfig(
         base_url=row["base_url"], model=row["embedding_model"], dim=row["embedding_dim"] or DEFAULT_DIM,
-        send_dimensions=s.send_dimensions, trusted=False, account_id=account_id, key_enc=row["api_key_enc"])
+        send_dimensions=s.send_dimensions, trusted=False, account_id=account_id, key_enc=row["api_key_enc"],
+        key_context=key_context(account_id))
 
 
 def chat_config_for(conn, ref: int | str) -> ChatConfig:
@@ -171,9 +179,35 @@ def chat_config_for(conn, ref: int | str) -> ChatConfig:
     if not row["chat_model"]:
         raise AccountError("this account has no chat model configured")
     return ChatConfig(base_url=row["base_url"], model=row["chat_model"], trusted=False, label=row["name"],
-                      key_enc=row["api_key_enc"])
+                      key_enc=row["api_key_enc"], key_context=key_context(row["id"]))
 
 
 def active_embedding_ref(conn) -> int | str | None:
     pointer = store.get(conn, embedcfg.SETTING)
     return int(pointer) if pointer else ("env" if env_account() else None)
+
+
+def upgrade_stored_keys(conn) -> int:
+    """After the vault is unlocked: bind every stored key to its account (rows written before contexts existed carry no binding).
+    Idempotent and cheap; returns how many rows were rewritten. A key that cannot be opened is left alone."""
+    n = 0
+    for row in conn.execute("SELECT id, api_key_enc FROM llm_account WHERE api_key_enc IS NOT NULL ORDER BY id").fetchall():
+        ctx = key_context(row["id"])
+        try:
+            vault.decrypt(row["api_key_enc"], ctx)
+            if row["api_key_enc"].startswith("v2$"):
+                continue                                   # already a v2 token bound to this row
+        except vault.VaultLocked:
+            conn.rollback()
+            return n
+        except vault.VaultError:
+            pass
+        try:
+            plain = vault.decrypt_compat(row["api_key_enc"], ctx)
+        except vault.VaultError:
+            continue
+        conn.execute("UPDATE llm_account SET api_key_enc=%s WHERE id=%s AND api_key_enc=%s",
+                     (vault.encrypt(plain, ctx), row["id"], row["api_key_enc"]))
+        n += 1
+    conn.commit()
+    return n

@@ -1,1 +1,1 @@
-agentpg-kit @ https://github.com/elchinoo/agentpg-kit/archive/1ea3c1c82659cb879cbacf3213cf8dc52b70041e.tar.gz
+agentpg-kit @ https://github.com/elchinoo/agentpg-kit/archive/7641885e937856e46396648a965d74475d7e713f.tar.gz

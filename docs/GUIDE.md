@@ -247,8 +247,11 @@ All variables below were checked in `config.py`, `core.py`, `cli.py`, `housekeep
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PAGERLENS_ALLOW_ANONYMOUS` | false | `true` disables authentication entirely. Throwaway local demos only |
-| `PAGERLENS_API_KEY[_FILE]` | none (file: `/etc/pagerlens/api_key`) | Optional static full-access credential for automation. Prefer API tokens |
+| `PAGERLENS_ALLOW_ANONYMOUS` | false | `true` disables authentication entirely. Honoured only when the server binds to a loopback address (`PAGERLENS_HOST`, else `HOST`; an unset or unknown address counts as public) or `PAGERLENS_ALLOW_ANONYMOUS_PUBLIC=1` is also set. Throwaway local demos only |
+| `PAGERLENS_HOST` | `HOST`, else `0.0.0.0` | The address the server binds to. Also what the anonymous-mode check reads |
+| `PAGERLENS_API_KEY[_FILE]` | none (file: `/etc/pagerlens/api_key`) | Optional static full-access credential for automation. At least 32 characters (a shorter key is never accepted) and a warning is logged at startup while one is enabled. Prefer API tokens |
+| `PAGERLENS_TRUSTED_HOPS` | 1 | How many of your own reverse proxies sit in front of the app; the client address used for rate limiting is the entry that many places from the right of `X-Forwarded-For`. `0` uses the socket peer |
+| `PAGERLENS_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Addresses (comma-separated, CIDRs allowed) of the proxies uvicorn trusts for `X-Forwarded-*`. Never `*`. Set it to your proxy's address when the proxy is not on the same machine |
 | `PAGERLENS_ENCRYPTION_KEY[_FILE]` | none (file: `/etc/pagerlens/encryption_key`) | Platform-managed secret that lets the vault unlock itself after a restart. With single sign-on and no admin password it also lets PagerLens create the vault |
 | `PAGERLENS_OIDC_ISSUER` | none | Identity provider URL. Federation is off when unset |
 | `PAGERLENS_OIDC_CLIENT_ID` | `pagerlens` | The app's client id at the provider |
@@ -449,6 +452,7 @@ Bearer tokens go in `Authorization: Bearer <token>`. Browser sessions use the `p
 | `POST /api/setup`, `/api/login`, `/api/logout` | none (rate limited) | First-run setup, password or static-key login, logout |
 | `GET /auth/login`, `/auth/callback` | none | Federated sign-in (404 when SSO is off) |
 | `POST /api/vault/unlock` | `settings:manage` | Unlock stored provider keys with the admin password |
+| `POST /api/vault/rotate` | administrator (`*`) | Replace the vault data key and re-encrypt every stored provider key. Body `{password, confirm: true}`; restart other replicas afterwards |
 | `POST /api/admin-password` | `settings:manage` | Set or change the admin password |
 | `GET/POST /api/tokens`, `DELETE /api/tokens/{id}` | `settings:manage` | List, create (value returned once), revoke |
 | `GET /api/providers` | `dashboard:read` | Static provider presets |
@@ -615,7 +619,7 @@ The full model is in [SECURITY.md](../SECURITY.md). The points that matter when 
 - Fail closed: with no credential configured every protected route is denied and the setup flow is offered. Anonymous mode exists only behind `PAGERLENS_ALLOW_ANONYMOUS=true`.
 - The admin password is stored as a salted scrypt hash (12-character minimum). Sessions last 12 hours, the cookie is `HttpOnly`, `SameSite=Strict` (federated sessions use `Lax`), `Secure` over HTTPS, and only its SHA-256 is stored. API tokens are shown once and stored as SHA-256 hashes.
 - Failed sign-ins and bad credentials are rate limited to 10 per minute per client address, in memory and per process. Behind a reverse proxy all clients can share one address: add proxy-level limits.
-- Provider keys are encrypted with Fernet under a random data key that the admin password wraps (and optionally `PAGERLENS_ENCRYPTION_KEY`). After a restart the vault is locked until the admin signs in or the platform secret unlocks it. Locked means HTTP 423 for features that need a stored key.
+- Provider keys are encrypted (AES-256-GCM, bound to their own account row so a copied ciphertext does not decrypt) under a random data key that the admin password wraps (and optionally `PAGERLENS_ENCRYPTION_KEY`). After a restart the vault is locked until the admin signs in or the platform secret unlocks it. Locked means HTTP 423 for features that need a stored key.
 - Outbound provider URLs are validated before every call (https; no embedded credentials; no loopback, private, link-local or carrier-grade-NAT addresses unless allowed; redirects never followed; responses size limited). The DNS-rebinding limitation noted in SECURITY.md applies.
 - The investigator and the model can only call eight registered read-only tools; tool results are fenced as `<untrusted_data>`, the model's answer is validated (known categories, observation ids that exist for this incident, text scrubbed again) and ungrounded claims are discounted. Log text is untrusted and can still mislead a model into a wrong opinion; a person decides.
 - **AI methods send log excerpts to the provider you choose.** Scrubbing at ingest is best effort. This includes Ask: whatever its read-only tools return for a question is sent to the chat account's provider.
@@ -649,7 +653,7 @@ All state is in Postgres: services, telemetry, incidents, runs, reports, memory,
 | Change the admin password | Settings > Security (needs the current password). Signs every browser out; the vault is re-wrapped |
 | Forgot the admin password | `pagerlens reset-admin` where the server can reach the database (on AgentPG: `agentpg sandbox console <sandbox-id>`). It clears the password, the vault and every stored provider key, then restarts first-run setup |
 | Unlock the vault after a restart | Sign in with the admin password, or set `PAGERLENS_ENCRYPTION_KEY` so it unlocks itself |
-| Rotate `PAGERLENS_ENCRYPTION_KEY` | Not verified in this guide. The vault module supports password changes; for a platform-key change the safe path is to re-enter provider keys. See known limitations |
+| Rotate the vault data key | `POST /api/vault/rotate` with `{"password": "...", "confirm": true}` (administrator), or `pagerlens rotate-key --confirm` where the server can reach the database. It generates a new key, re-encrypts every stored provider key and rewrites the password and platform wraps in one transaction (all or nothing), and logs a line without secrets. **Restart every other replica afterwards**: they still hold the old key in memory. Old backups still open with the old key, so also re-issue the provider keys at their source if they may have been exposed. Changing the admin password or `PAGERLENS_ENCRYPTION_KEY` only re-wraps the same data key |
 | Rotate a provider key | Edit the account in Settings and enter the new key, or clear and re-add it |
 
 ### Changing the embedding size
@@ -789,3 +793,11 @@ Three wishes were made for PagerLens. Here is what each one is today, without ro
 1. *Ask in plain English and watch a verified answer.* Break checkout in the Lab, investigate with Rules, open **Ask**, press "Why is checkout-api failing?": the typing state, then an answer with chips for the incident, the evidence and the runbook, each verified against the database. A second take shows an answer with an invented citation marked `UNVERIFIED` (use a scripted model or a real one that slips).
 2. *Approve a proposed index and see before and after.* With `PAGERLENS_ALLOW_TUNING_APPLY=true` on a throwaway instance, **Look for improvements** (or a proposal prepared in advance when the advisor has nothing to say), approve with a note, apply, and read the EXPLAIN table: `Seq Scan` before, an index scan after, with the cost that fell.
 3. *The fleet in your editor.* `ecoctl mcp claude`, then Claude Code asks `ask` about an incident and reads the fleet's databases read-only (section 9.1).
+
+## Upgrading to agentpg-kit 0.4.0
+
+- Upgrade every process of the app together: an older kit cannot read the new key wraps or the `v2$` ciphertexts that this version writes.
+- Provider keys stored before this version are read as before and are re-encrypted, bound to their account, the first time the vault is unlocked (sign-in, platform secret or `POST /api/vault/unlock`); `pagerlens rotate-key` also does it.
+- Single sign-on now sets a short-lived `apg_oidc_bind` cookie in the browser that starts the login; a callback without it is refused.
+- Set `PAGERLENS_FORWARDED_ALLOW_IPS` if the reverse proxy is not on the same machine as the app, and keep `PAGERLENS_TRUSTED_HOPS` equal to the number of proxies in front of it.
+- A static `PAGERLENS_API_KEY` shorter than 32 characters stops working: generate a new one (`openssl rand -hex 32`).

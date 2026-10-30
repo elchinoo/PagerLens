@@ -179,3 +179,59 @@ def test_redirects_are_refused(admin, monkeypatch):
 
 
 # ---- switching embeddings ---------------------------------------------------------------------
+
+
+# ---- contexts, legacy rows and rotation ---------------------------------------------------------
+def test_stored_keys_are_bound_to_their_account_and_survive_rotation(admin):
+    from pagerlens import accounts
+    a = new_account(admin).json()["id"]
+    b = new_account(admin, name="second", api_key="sk-" + "other" * 6).json()["id"]  # pragma: allowlist secret
+    with connect() as c:
+        enc_a = c.execute("SELECT api_key_enc FROM llm_account WHERE id=%s", (a,)).fetchone()["api_key_enc"]
+        assert enc_a.startswith("v2$")
+        assert vault.decrypt(enc_a, accounts.key_context(a)) == PROVIDER_KEY
+        with pytest.raises(vault.VaultError):
+            vault.decrypt(enc_a, accounts.key_context(b))                      # copied to another row: refused
+        assert "llm_account.api_key_enc" in core.vault.stores()
+    r = admin.post("/api/vault/rotate", json={"password": PASSWORD, "confirm": True}, headers=H)
+    assert r.status_code == 200 and r.json()["re_encrypted"] == {"llm_account.api_key_enc": 2}
+    with connect() as c:
+        new_a = c.execute("SELECT api_key_enc FROM llm_account WHERE id=%s", (a,)).fetchone()["api_key_enc"]
+        assert new_a != enc_a and vault.decrypt(new_a, accounts.key_context(a)) == PROVIDER_KEY
+        assert accounts.chat_config_for(c, a).api_key() == PROVIDER_KEY
+        assert accounts.chat_config_for(c, b).api_key() == "sk-" + "other" * 6
+    vault.lock()
+    with connect() as c:                                                        # the new wrap opens with the same password
+        assert vault.unlock_with_password(c, PASSWORD)
+
+
+def test_legacy_rows_are_read_and_then_bound_to_their_account(admin):
+    from cryptography.fernet import Fernet
+
+    from pagerlens import accounts
+    a = new_account(admin, api_key=None).json()["id"]
+    with connect() as c:
+        key = core.vault._data_key                                              # a Fernet token as the pre-context kit wrote it
+        import base64
+        legacy = Fernet(base64.urlsafe_b64encode(key)).encrypt(PROVIDER_KEY.encode()).decode()
+        c.execute("UPDATE llm_account SET api_key_enc=%s, api_key_last4='x' WHERE id=%s", (legacy, a))
+        c.commit()
+        assert accounts.chat_config_for(c, a).api_key() == PROVIDER_KEY         # old row still readable
+        assert accounts.upgrade_stored_keys(c) == 1
+        upgraded = c.execute("SELECT api_key_enc FROM llm_account WHERE id=%s", (a,)).fetchone()["api_key_enc"]
+        assert upgraded.startswith("v2$") and vault.decrypt(upgraded, accounts.key_context(a)) == PROVIDER_KEY
+        assert accounts.upgrade_stored_keys(c) == 0                             # idempotent
+        # a v2 token written without a context (empty) is bound too
+        c.execute("UPDATE llm_account SET api_key_enc=%s WHERE id=%s", (vault.encrypt(PROVIDER_KEY), a))
+        c.commit()
+        assert accounts.chat_config_for(c, a).api_key() == PROVIDER_KEY
+        assert accounts.upgrade_stored_keys(c) == 1
+
+
+def test_rotation_needs_confirm_the_password_and_an_administrator(admin):
+    assert admin.post("/api/vault/rotate", json={"password": PASSWORD}, headers=H).status_code == 422
+    assert admin.post("/api/vault/rotate", json={"confirm": True}, headers=H).status_code == 422
+    assert admin.post("/api/vault/rotate", json={"password": "wrong-password-12", "confirm": True}, headers=H).status_code == 403  # pragma: allowlist secret
+    tok = admin.post("/api/tokens", json={"name": "ro", "scope": "read"}, headers=H).json()["token"]
+    assert admin.post("/api/vault/rotate", json={"password": PASSWORD, "confirm": True},
+                      headers={"Authorization": f"Bearer {tok}", **H}).status_code in (401, 403)

@@ -21,6 +21,8 @@ def main(argv: list[str] | None = None) -> int:
     tn.add_argument("action", choices=["scan", "list"], help="scan: look for improvements and record proposals; list: show them")
     sub.add_parser("reembed", help="resize the vector columns to EMBEDDING_DIM if needed and re-embed incidents and runbooks")
     sub.add_parser("serve", help="run the API + MCP server")
+    rk = sub.add_parser("rotate-key", help="replace the vault data key and re-encrypt every stored secret (asks for the admin password)")
+    rk.add_argument("--confirm", action="store_true", help="required: restart every other replica afterwards")
     sub.add_parser("reset-admin", help="forget the admin password and delete stored provider keys (recovery)")
     sub.add_parser("start", help="container entrypoint: migrate, optionally seed (AUTO_SEED=true), serve")
     args = p.parse_args(argv)
@@ -79,6 +81,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"tokens used: {r['tokens']['prompt']} prompt, {r['tokens']['completion']} completion")
     elif args.cmd == "reembed":
         return _reembed()
+    elif args.cmd == "rotate-key":
+        return _rotate_key(args.confirm)
     elif args.cmd == "reset-admin":
         from . import auth
         from .db import connect
@@ -143,6 +147,45 @@ def _reconcile_embeddings() -> None:
               + (f", stopped early: {r['failed']}" if r["failed"] else ""))
 
 
+def _rotate_key(confirm: bool) -> int:
+    """Replace the vault data key. The admin password comes from a prompt (or PAGERLENS_ADMIN_PASSWORD for automation); nothing
+    secret is logged. Other replicas hold the old key in memory and must be restarted afterwards."""
+    import getpass
+    import logging
+    import os
+
+    from . import accounts, core
+    from .db import connect
+
+    if not confirm:
+        print("rotate-key replaces the data key and re-encrypts every stored secret; re-run with --confirm. "
+              "Restart every other replica afterwards.", file=sys.stderr)
+        return 2
+    with connect() as conn:
+        if not core.vault.is_initialized(conn):
+            print("there is no vault to rotate", file=sys.stderr)
+            return 1
+        password = None
+        if core.vault.has_password_wrap(conn):
+            password = os.environ.get("PAGERLENS_ADMIN_PASSWORD") or getpass.getpass("admin password: ")
+            if not core.vault.unlock_with_password(conn, password):
+                print("wrong admin password", file=sys.stderr)
+                return 1
+        elif not core.vault.try_unlock_with_platform_secret(conn):
+            print("the vault is locked and no platform secret is set", file=sys.stderr)
+            return 1
+        conn.commit()
+        accounts.upgrade_stored_keys(conn)
+        try:
+            counts = core.vault.rotate_data_key(conn, password=password)
+        except Exception as exc:  # noqa: BLE001 - nothing was changed: the rotation is one transaction
+            print(f"rotation failed, nothing was changed: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 1
+    logging.getLogger("pagerlens.security").warning("vault data key rotated from the command line; re-encrypted %s", counts)
+    print(f"data key rotated; re-encrypted: {counts or 'nothing'}. Restart every other replica now.")
+    return 0
+
+
 def _reembed() -> int:
     from .db import connect_vector
     from .migrate import reconcile_embedding_dim
@@ -184,7 +227,11 @@ def _serve() -> None:
 
     import uvicorn
 
-    uvicorn.run("pagerlens.api:app", host=os.environ.get("HOST", "0.0.0.0"), port=int(os.environ.get("PORT", "8000")))
+    from .config import bind_host
+
+    # Trust X-Forwarded-* only from the proxy (default: this machine), never "*": see PAGERLENS_FORWARDED_ALLOW_IPS in the guide.
+    uvicorn.run("pagerlens.api:app", host=bind_host(), port=int(os.environ.get("PORT", "8000")), proxy_headers=True,
+                forwarded_allow_ips=os.environ.get("PAGERLENS_FORWARDED_ALLOW_IPS", "127.0.0.1"))
 
 
 def _start() -> int:

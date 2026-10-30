@@ -244,7 +244,7 @@ RUNBOOKS = [
 def _fill(template: str, rng: random.Random) -> str:
     out = template
     for token, gen in (("<ms>", lambda: str(rng.randint(8, 400))), ("<ip>", lambda: str(rng.randint(2, 250))),
-                       ("<id>", lambda: hashlib.sha1(str(rng.random()).encode()).hexdigest()[:10]),
+                       ("<id>", lambda: hashlib.sha1(str(rng.random()).encode(), usedforsecurity=False).hexdigest()[:10]),
                        ("<amt>", lambda: f"{rng.randint(5, 300)}.{rng.randint(0, 99):02d}"),
                        ("<n>", lambda: str(rng.randint(1, 99))), ("<sku>", lambda: f"SKU-{rng.randint(1000, 9999)}")):
         while token in out:
@@ -357,12 +357,12 @@ def generate(conn, scenario: Scenario | None, *, now: datetime | None = None, se
             ingest.ingest_logs(conn, name, batch)
     for svc, days, version, summary in OLD_DEPLOYS:
         ingest.ingest_deploy(conn, svc, {"version": version, "author": "release-bot", "summary": summary,
-                                         "git_sha": hashlib.sha1(f"{svc}{version}".encode()).hexdigest()[:10],
+                                         "git_sha": hashlib.sha1(f"{svc}{version}".encode(), usedforsecurity=False).hexdigest()[:10],
                                          "ts": _iso(now - timedelta(days=days))})
     if scenario:
         for svc, mins_before_alert, version, author, summary in scenario.deploys:
             ingest.ingest_deploy(conn, svc, {"version": version, "author": author, "summary": summary,
-                                             "git_sha": hashlib.sha1(f"{svc}{version}".encode()).hexdigest()[:10],
+                                             "git_sha": hashlib.sha1(f"{svc}{version}".encode(), usedforsecurity=False).hexdigest()[:10],
                                              "ts": _iso(now - timedelta(minutes=mins_before_alert))})
 
 

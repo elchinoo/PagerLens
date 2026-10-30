@@ -266,7 +266,7 @@ def _name(prefix: str, table: str, cols: list[str]) -> str:
     raw = f"{prefix}_{table}_{'_'.join(cols)}"
     if len(raw) <= 63:
         return raw
-    return raw[:54] + "_" + hashlib.sha1(raw.encode()).hexdigest()[:8]
+    return raw[:54] + "_" + hashlib.sha1(raw.encode(), usedforsecurity=False).hexdigest()[:8]
 
 
 def _own_tables(conn) -> dict[str, set[str]]:

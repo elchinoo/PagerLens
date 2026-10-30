@@ -22,6 +22,7 @@ class EmbeddingConfig:
     account_id: int | None   # None => environment
     key_plain: str = ""
     key_enc: str | None = None
+    key_context: str = ""    # what the stored key was encrypted for (accounts.key_context)
 
     @property
     def semantic(self) -> bool:
@@ -32,7 +33,7 @@ class EmbeddingConfig:
         return self.model if self.base_url else "builtin-hash"
 
     def api_key(self) -> str:
-        return vault.decrypt(self.key_enc) if self.key_enc else self.key_plain
+        return vault.decrypt_compat(self.key_enc, self.key_context) if self.key_enc else self.key_plain
 
 
 def from_env() -> EmbeddingConfig:

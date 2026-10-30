@@ -38,6 +38,12 @@ affected version or commit.
   environment or a file: treat it like a password, or leave it unset and use tokens.
 - Failed sign-ins and bad credentials are rate limited (10 per minute per client address, in memory, per
   process). Behind a reverse proxy all clients can share one address, so add proxy-level limits too.
+- The client address used for rate limiting is the `PAGERLENS_TRUSTED_HOPS`-th entry from the right of `X-Forwarded-For` (default 1),
+  and the server trusts forwarded headers only from `PAGERLENS_FORWARDED_ALLOW_IPS` (default `127.0.0.1`, never `*`).
+- A static `PAGERLENS_API_KEY` must be at least 32 characters. Single sign-on binds each login to the browser that started it
+  with a short-lived cookie. Anonymous mode is refused unless the server binds to loopback.
+- The data key can be replaced (`POST /api/vault/rotate` or `pagerlens rotate-key --confirm`, admin password required); restart
+  other replicas afterwards.
 - With no credential configured the app **denies everything**. Anonymous access exists only behind the explicit
   opt-in `PAGERLENS_ALLOW_ANONYMOUS=true`; never use it on a reachable host.
 
@@ -51,7 +57,7 @@ affected version or commit.
   The agent's `agentpg` collector runs the CLI with a validated sandbox id and no shell.
 
 **Provider API keys**
-- Encrypted at rest with Fernet using a random 256-bit data key. The data key is stored only *wrapped*
+- Encrypted at rest (AES-256-GCM, each value bound to its own account row) using a random 256-bit data key. The data key is stored only *wrapped*
   (encrypted) under a key derived from the admin password, and optionally under a platform-managed secret
   (`PAGERLENS_ENCRYPTION_KEY`). A database dump alone reveals no provider key.
 - After a restart the data key is not in memory: the vault is **locked** until the admin enters the password

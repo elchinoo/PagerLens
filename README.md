@@ -501,8 +501,9 @@ Notes:
 | `AUTO_SEED` | `false` | With `pagerlens start`, load the demo fleet if no services exist. |
 | `PAGERLENS_ENCRYPTION_KEY` | none | Optional platform-managed secret that lets the vault unlock itself after a restart (file alternative: `/etc/pagerlens/encryption_key`). |
 | `PAGERLENS_ALLOW_PRIVATE_LLM_URLS` | `false` | Allow provider URLs on loopback/private networks, for a local model server. Link-local is always blocked. |
-| `PAGERLENS_API_KEY` | none | Optional static full-access credential for automation (file alternative: `/etc/pagerlens/api_key`). Prefer API tokens. |
-| `PAGERLENS_ALLOW_ANONYMOUS` | `false` | `true` disables authentication entirely. Throwaway local demos only. |
+| `PAGERLENS_API_KEY` | none | Optional static full-access credential for automation (file alternative: `/etc/pagerlens/api_key`), at least 32 characters. Prefer API tokens. |
+| `PAGERLENS_ALLOW_ANONYMOUS` | `false` | `true` disables authentication entirely. Honoured only on a loopback bind (`PAGERLENS_HOST` or `HOST`) or with `PAGERLENS_ALLOW_ANONYMOUS_PUBLIC=1`. Throwaway local demos only. |
+| `PAGERLENS_HOST`, `PAGERLENS_TRUSTED_HOPS`, `PAGERLENS_FORWARDED_ALLOW_IPS` | `HOST` / `0.0.0.0`, `1`, `127.0.0.1` | Bind address; number of your reverse proxies in front of the app (client address for rate limits); proxies uvicorn trusts for `X-Forwarded-*` (never `*`). |
 | `PAGERLENS_HOUSEKEEPING` | `true` | `false` stops this process's background auto-resolve thread. The runtime switch is the `auto_resolve_minutes` setting (0 = off). |
 | `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_CHAT_MODEL`, `EMBEDDING_MODEL`, `EMBEDDING_DIM` | none | Optional environment provider: embeddings for retrieval, and the `env` chat account for the AI methods. The vector columns are created for `EMBEDDING_DIM` (default 768) on first start; if you change it later, the next start resizes them and re-embeds (see below). Without a provider a built-in offline hashing embedder is used: it matches words, not meaning. |
 

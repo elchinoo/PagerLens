@@ -1,4 +1,5 @@
 import pytest
+from fastapi import HTTPException
 from starlette.requests import Request
 
 from pagerlens import api, core
@@ -44,14 +45,32 @@ def test_missing_credentials_do_not_count_towards_lockout(client):
 
 
 def test_static_key_works_and_holds_every_permission(monkeypatch):
-    monkeypatch.setenv("PAGERLENS_API_KEY", "k")
-    p = api.authenticate(_request({"Authorization": "Bearer k"}))
+    key = "static-key-for-tests-0123456789abcdef"  # pragma: allowlist secret
+    monkeypatch.setenv("PAGERLENS_API_KEY", key)
+    p = api.authenticate(_request({"Authorization": f"Bearer {key}"}))
     assert p is not None and p.kind == "static" and p.can("settings:manage") and p.can("incidents:investigate")
+
+
+def test_a_short_static_key_is_never_accepted(monkeypatch):
+    monkeypatch.setenv("PAGERLENS_API_KEY", "k")
+    with pytest.raises(HTTPException) as exc:
+        api.authenticate(_request({"Authorization": "Bearer k"}))
+    assert exc.value.status_code == 401
 
 
 def test_anonymous_mode_is_explicit_opt_in(monkeypatch):
     assert api.authenticate(_request()) is None
     monkeypatch.setenv("PAGERLENS_ALLOW_ANONYMOUS", "true")
+    monkeypatch.setattr(core.auth, "bind_host", "127.0.0.1")
+    assert api.authenticate(_request()).kind == "anonymous"
+
+
+def test_anonymous_mode_is_refused_on_a_public_bind(monkeypatch):
+    monkeypatch.setenv("PAGERLENS_ALLOW_ANONYMOUS", "true")
+    monkeypatch.delenv("PAGERLENS_ALLOW_ANONYMOUS_PUBLIC", raising=False)
+    monkeypatch.setattr(core.auth, "bind_host", "0.0.0.0")
+    assert api.authenticate(_request()) is None
+    monkeypatch.setenv("PAGERLENS_ALLOW_ANONYMOUS_PUBLIC", "1")
     assert api.authenticate(_request()).kind == "anonymous"
 
 

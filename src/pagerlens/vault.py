@@ -15,3 +15,14 @@ change_password = _v.change_password
 reset = _v.reset
 encrypt = _v.encrypt
 decrypt = _v.decrypt
+
+
+def decrypt_compat(token: str, context: str) -> str:
+    """Open a token bound to `context`; a value written before contexts existed (empty context) is still read. `upgrade` in
+    accounts re-encrypts such rows with their context after the vault is unlocked."""
+    try:
+        return _v.decrypt(token, context)
+    except VaultLocked:
+        raise
+    except VaultError:
+        return _v.decrypt(token)

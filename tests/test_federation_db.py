@@ -273,3 +273,34 @@ def test_with_sso_only_the_vault_is_created_from_the_platform_secret(monkeypatch
     with connect() as c:
         assert vault.is_initialized(c) and vault.try_unlock_with_platform_secret(c)
     assert vault.decrypt(token) == "sk-secret-value"
+
+
+def test_a_callback_from_a_browser_that_did_not_start_the_login_is_refused(client):
+    r = client.get("/auth/login", follow_redirects=False)
+    assert "apg_oidc_bind" in r.headers.get("set-cookie", "")
+    q = parse_qs(urlsplit(r.headers["location"]).query)
+    client.provider.nonce = q["nonce"][0]
+    client.cookies.clear()                                                                            # another browser: no binding cookie
+    cb = client.get("/auth/callback", params={"code": "c", "state": q["state"][0]}, follow_redirects=False)
+    assert cb.headers["location"].startswith("/?sso_error=") and "pl_session" not in cb.cookies
+    assert client.get("/api/incidents").status_code == 401
+
+
+def test_a_callback_with_the_wrong_binding_cookie_is_refused_and_the_state_is_burnt(client):
+    r = client.get("/auth/login", follow_redirects=False)
+    q = parse_qs(urlsplit(r.headers["location"]).query)
+    client.provider.nonce = q["nonce"][0]
+    client.cookies.clear()
+    client.cookies.set("apg_oidc_bind", "not-the-binding")
+    cb = client.get("/auth/callback", params={"code": "c", "state": q["state"][0]}, follow_redirects=False)
+    assert cb.headers["location"].startswith("/?sso_error=") and "pl_session" not in cb.cookies
+    assert client.get("/api/incidents").status_code == 401
+
+
+def test_the_binding_cookie_is_cleared_after_a_successful_callback(client):
+    r = client.get("/auth/login", follow_redirects=False)
+    q = parse_qs(urlsplit(r.headers["location"]).query)
+    client.provider.nonce = q["nonce"][0]
+    cb = client.get("/auth/callback", params={"code": "c", "state": q["state"][0]}, follow_redirects=False)
+    assert cb.status_code == 303 and any("apg_oidc_bind" in v for v in cb.headers.get_list("set-cookie"))
+    assert "apg_oidc_bind" not in client.cookies

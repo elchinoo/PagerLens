@@ -17,6 +17,11 @@ class Settings:
     send_dimensions: bool
 
 
+def bind_host() -> str:
+    """The address the server binds to: PAGERLENS_HOST, else HOST, else all interfaces (public, as far as the kit is concerned)."""
+    return os.environ.get("PAGERLENS_HOST") or os.environ.get("HOST") or "0.0.0.0"  # noqa: S104 - a default, not a bind in this module
+
+
 def _api_key() -> str:
     return read_secret("PAGERLENS_API_KEY", "/etc/pagerlens/api_key")
 

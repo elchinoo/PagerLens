@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import json
+import logging
 import sys
 import time
 from pathlib import Path
@@ -8,7 +9,7 @@ from pathlib import Path
 import psycopg
 from apgkit import insights as kit_insights
 from apgkit import masking
-from apgkit.auth.rp import safe_return_to
+from apgkit.auth.rp import BINDING_COOKIE, clear_binding, safe_return_to
 from apgkit.config import database_url, env_bool
 from apgkit.guard import SecurityGuard
 from apgkit.web import is_https, mount_kit_static, public_url
@@ -56,6 +57,13 @@ hub = live.Hub(database_url)      # one LISTEN connection per process, opened wh
 
 _announced = False
 _auto_unlock_tried = False
+log = logging.getLogger("pagerlens.security")
+
+
+def _bind_stored_keys(conn) -> None:
+    """Best effort after the vault unlocks: bind provider keys written before contexts existed to their own account."""
+    with contextlib.suppress(Exception):
+        accounts.upgrade_stored_keys(conn)
 
 
 def _announce_setup_code() -> None:
@@ -78,7 +86,8 @@ def _startup_tasks() -> None:
             if fed.enabled and not vault.is_initialized(conn):
                 core.vault.initialize_with_platform_secret(conn)   # single sign-on only: no admin password to wrap the key with
                 conn.commit()
-            vault.try_unlock_with_platform_secret(conn)
+            if vault.try_unlock_with_platform_secret(conn):
+                _bind_stored_keys(conn)
             if local.needs_setup(conn) and not fed.enabled:
                 _announce_setup_code()
     except Exception:  # noqa: BLE001 - database may be asleep; it is retried on the first request
@@ -247,7 +256,8 @@ def session_state(request: Request):
         with connect(retries=1) as conn:
             if not _auto_unlock_tried:
                 _auto_unlock_tried = True
-                vault.try_unlock_with_platform_secret(conn)
+                if vault.try_unlock_with_platform_secret(conn):
+                    _bind_stored_keys(conn)
             setup = local.needs_setup(conn) and not env_bool("PAGERLENS_ALLOW_ANONYMOUS") and not fed.enabled
             v = vault.status(conn)
             has_password = local.admin_configured(conn)
@@ -274,33 +284,44 @@ def sso_login(request: Request, next: str | None = None):
         raise HTTPException(404, "single sign-on is not configured")
     try:
         with connect(retries=1) as conn:
-            url = fed.rp.begin(conn, public_url(request, core.public_url_env) + "/auth/callback", next)
+            start = fed.rp.start(conn, public_url(request, core.public_url_env) + "/auth/callback", next)
     except psycopg.Error as exc:
         raise _db_unavailable() from exc
     except Exception:  # noqa: BLE001 - the identity provider may be unreachable
         return RedirectResponse("/?sso_error=the identity provider is unavailable", status_code=303)
-    return RedirectResponse(url, status_code=303)
+    resp = RedirectResponse(start.url, status_code=303)
+    start.bind(resp, secure=is_https(request))      # ties the login to this browser: the callback must present the cookie
+    return resp
 
 
 @app.get("/auth/callback")
 def sso_callback(request: Request, code: str = "", state: str = "", error: str = ""):
     if not fed.enabled:
         raise HTTPException(404, "single sign-on is not configured")
+    secure = is_https(request)
+
+    def _fail(message: str) -> RedirectResponse:
+        out = RedirectResponse("/?sso_error=" + message, status_code=303)
+        clear_binding(out, secure=secure)
+        return out
+
     if error or not code or not state:
-        return RedirectResponse("/?sso_error=the sign-in was cancelled or failed", status_code=303)
+        return _fail("the sign-in was cancelled or failed")
     from apgkit.auth import TokenError
     try:
         with connect(retries=1) as conn:
-            claims, back, id_token = fed.rp.finish(conn, public_url(request, core.public_url_env) + "/auth/callback", code, state)
+            claims, back, id_token = fed.rp.finish(conn, public_url(request, core.public_url_env) + "/auth/callback", code, state,
+                                                   request.cookies.get(BINDING_COOKIE))
             roles = [r for r in claims.get("roles", []) if isinstance(r, str)]
             resp = RedirectResponse(safe_return_to(back), status_code=303)
             if not core.APP_AUTH.permissions_for(roles=roles):
-                return RedirectResponse("/?sso_error=your account has no role in PagerLens; ask an administrator", status_code=303)
+                return _fail("your account has no role in PagerLens; ask an administrator")
             _start_session(conn, request, resp, subject=str(claims["sub"]), name=str(claims.get("name") or ""), email=str(claims.get("email") or ""),
                            roles=roles, source="oidc", id_token_hint=id_token)
+            clear_binding(resp, secure=secure)
             return resp
     except TokenError as exc:
-        return RedirectResponse("/?sso_error=" + str(exc)[:120], status_code=303)
+        return _fail(str(exc)[:120])
 
 
 @app.post("/api/setup")
@@ -323,18 +344,26 @@ def setup(body: SetupBody, request: Request, response: Response):
 
 @app.post("/api/login")
 def login(body: LoginBody, request: Request, response: Response):
-    client = _guard_attempts(request)
+    client = auth.client(request)
     try:
         with connect(retries=1) as conn:
             ok = False
             if body.password is not None:
-                ok = local.login_password(conn, body.password)
-            elif body.api_key is not None and local.static_key_matches(body.api_key):
-                ok = True
-                vault.try_unlock_with_platform_secret(conn)
-            if not ok:
-                auth.limiter.record(client)
-                raise HTTPException(401, "invalid credentials")
+                # the kit counts the attempt in the limiter before hashing (429 over the limit, 503 when scrypt is busy)
+                ok = local.login_password(conn, body.password, client=client, limiter=auth.limiter)
+                if not ok:
+                    raise HTTPException(401, "invalid credentials")
+                _bind_stored_keys(conn)
+            else:
+                if auth.limiter.limited(client):
+                    raise HTTPException(429, "too many failed attempts; wait a minute")
+                if body.api_key is not None and local.static_key_matches(body.api_key):
+                    ok = True
+                    if vault.try_unlock_with_platform_secret(conn):
+                        _bind_stored_keys(conn)
+                if not ok:
+                    auth.limiter.record(client)
+                    raise HTTPException(401, "invalid credentials")
             _start_session(conn, request, response)
     except (psycopg.Error, RuntimeError) as exc:
         raise _db_unavailable() from exc
@@ -366,7 +395,44 @@ def unlock_vault(body: UnlockBody, request: Request):
             auth.limiter.record(client)
             raise HTTPException(403, "wrong password")  # 403, not 401: the session itself is still valid
         conn.commit()
+        _bind_stored_keys(conn)
     return {"ok": True}
+
+
+class RotateBody(BaseModel):
+    password: str | None = Field(default=None, max_length=256)
+    confirm: bool = False
+
+
+@app.post("/api/vault/rotate")
+def rotate_vault(body: RotateBody, request: Request, principal=Depends(require("settings:manage"))):
+    """Replace the vault's data key and re-encrypt every stored secret (administrators only). Needs the admin password and
+    `confirm: true`. Other replicas keep the old key in memory: restart them right after."""
+    if not body.confirm:
+        raise HTTPException(422, "set confirm to true: this replaces the data key; restart every other replica afterwards")
+    if "*" not in principal.permissions:
+        raise HTTPException(403, "only an administrator can rotate the data key")
+    client = _guard_attempts(request)
+    with connect() as conn:
+        if not vault.is_initialized(conn):
+            raise HTTPException(409, "there is no vault to rotate")
+        if core.vault.has_password_wrap(conn):
+            if not body.password:
+                raise HTTPException(422, "the admin password is required")
+            if not local.login_password(conn, body.password, client=client, limiter=auth.limiter):   # counted before hashing; unlocks
+                raise HTTPException(403, "wrong password")
+        elif not vault.is_unlocked() and not vault.try_unlock_with_platform_secret(conn):
+            raise HTTPException(423, "the vault is locked")
+        conn.commit()
+        try:
+            counts = core.vault.rotate_data_key(conn, password=body.password)
+        except vault.VaultLocked as exc:
+            raise HTTPException(423, str(exc)) from exc
+        except vault.VaultError as exc:
+            raise HTTPException(409, str(exc)) from exc
+    embedcfg.reset()                      # a cached account embedder still holds a ciphertext of the old key
+    log.warning("vault data key rotated by %s; re-encrypted %s; restart the other replicas", principal.name or principal.source, counts)
+    return {"ok": True, "re_encrypted": counts, "restart_other_replicas": True}
 
 
 @app.post("/api/admin-password", dependencies=[Depends(require("settings:manage"))])
