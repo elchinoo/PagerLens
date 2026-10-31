@@ -234,8 +234,9 @@ def _serve() -> None:
                 forwarded_allow_ips=os.environ.get("PAGERLENS_FORWARDED_ALLOW_IPS", "127.0.0.1"))
 
 
-def _start() -> int:
-    """Zero-touch startup for sandboxes where the user cannot run separate migrate/seed jobs."""
+def prepare_database() -> int:
+    """Everything `start` does before serving: migrations, embedding reconciliation, runbooks and the optional demo seed.
+    With sealed boot this runs after the operator unseals (the database URL is inside the sealed blob), not at process start."""
     import os
 
     from .migrate import run
@@ -262,6 +263,18 @@ def _start() -> int:
             empty = conn.execute("SELECT NOT EXISTS (SELECT 1 FROM service) AS e").fetchone()["e"]
         if empty:
             _seed()
+    return 0
+
+
+def _start() -> int:
+    """Zero-touch startup for sandboxes where the user cannot run separate migrate/seed jobs."""
+    from apgkit import sealed as sealing
+
+    # Sealed: the database URL does not exist yet, so the server starts first and the app prepares the database when it is unsealed.
+    if not sealing.Sealed.from_env().enabled:
+        code = prepare_database()
+        if code:
+            return code
     _serve()
     return 0
 

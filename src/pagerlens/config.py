@@ -1,7 +1,7 @@
 import os
 from dataclasses import dataclass
 
-from apgkit.config import read_secret
+from apgkit.config import database_url, read_secret
 
 
 @dataclass(frozen=True)
@@ -30,10 +30,7 @@ def get_settings() -> Settings:
     return Settings(
         # First match wins. An empty DSN makes libpq fall back to the standard PG* variables
         # (PGHOST, PGUSER, PGPASSWORD, PGDATABASE...), which linked sandboxes also provide.
-        database_url=os.environ.get("DATABASE_URL")
-        or os.environ.get("DB_EXTERNAL_DSN")
-        or os.environ.get("PSQL_CONNECTION_STRING")
-        or "",
+        database_url=database_url(),   # sealed value first, then DATABASE_URL, DB_EXTERNAL_DSN, PSQL_CONNECTION_STRING
         api_key=_api_key(),
         llm_base_url=os.environ.get("LLM_BASE_URL", "").rstrip("/"),
         llm_api_key=read_secret("LLM_API_KEY", "/etc/pagerlens/llm_api_key"),

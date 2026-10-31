@@ -4,9 +4,14 @@ Permissions are what the code checks (`incidents:investigate`); roles (given to 
 (given to services, local API tokens and the static key) are mapped onto them here, in one place.
 """
 
+import os
+
 from apgkit import metrics as metrics_mod
-from apgkit.auth import AppAuth, Authenticator, LocalAuth, from_env
-from apgkit.config import env_bool
+from apgkit.auth import AppAuth, Authenticator, LocalAuth
+from apgkit.auth.env import Federation
+from apgkit.auth.oidc import TokenVerifier, jwks_ttl_from_env
+from apgkit.auth.rp import RelyingParty
+from apgkit.config import env_bool, read_secret
 from apgkit.db import Database
 from apgkit.llm import LLMClient
 from apgkit.netguard import NetGuard
@@ -59,7 +64,22 @@ SCOPE_PERMISSIONS = {
     # scopes the identity provider can grant to services
     "pagerlens.ingest": frozenset({"ingest:write"}), "pagerlens.read": READ, "pagerlens.metrics": frozenset({"metrics:scrape"}),
 }
-fed = from_env("PAGERLENS", APP)
+
+
+def _federation() -> Federation:
+    """`apgkit.auth.from_env`, except the client secret is never read at import. The kit decides there whether the relying party is a
+    confidential client by looking at the secret once, which under sealed boot does not exist yet (it is inside the sealed blob) and
+    would leave SSO a public client for the life of the process. Here the secret is read when a login is finished."""
+    issuer = os.environ.get("PAGERLENS_OIDC_ISSUER", "").strip()
+    client_id = os.environ.get("PAGERLENS_OIDC_CLIENT_ID", APP)
+    local_login = env_bool("PAGERLENS_LOCAL_LOGIN", True)
+    if not issuer:
+        return Federation("", client_id, None, None, True)
+    return Federation(issuer.rstrip("/"), client_id, TokenVerifier(issuer, client_id, ttl=jwks_ttl_from_env("PAGERLENS")),
+                      RelyingParty(issuer, client_id, lambda: read_secret("PAGERLENS_OIDC_CLIENT_SECRET")), local_login)
+
+
+fed = _federation()
 APP_AUTH = AppAuth(APP, fed.client_id, ROLE_PERMISSIONS, SCOPE_PERMISSIONS)
 
 

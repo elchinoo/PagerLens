@@ -218,6 +218,10 @@ Files full of credentials are the usual way these tools leak, so PagerLens avoid
 
 After a **restart** stored provider keys are locked until you sign in. `pagerlens reset-admin` is the only recovery from a lost password and it deletes the stored keys. See [SECURITY.md](SECURITY.md) for the full model and its limits.
 
+### Sealed boot
+
+Anything in an app's environment, config files or image is readable by whoever breaches the platform. With sealed boot you deploy PagerLens with **one** setting, `APGKIT_SEALED`: a blob encrypted (AES-256-GCM) under an operator passphrase that holds `DATABASE_URL`, the OIDC client secret, the API and LLM keys and anything else secret. Make it with `ecoctl seal` from agentpg-ecosystem. The app starts sealed: it answers `503` except on `/_seal/*`, `/healthz`, `/health` and `/livez`. The operator sends the passphrase (encrypted to a key that exists only in that process); the app then opens the blob, runs the migrations, unlocks the vault with the same passphrase and starts serving. While unsealed the secrets are read from the blob first, so nothing else needs to be set. Without `APGKIT_SEALED` nothing changes. When sealing is on, `PAGERLENS_ENCRYPTION_KEY` is ignored and the vault is created or opened with the passphrase. See the agentpg-kit guide, section 7.3.3.
+
 ## Single sign-on and roles (the ecosystem identity provider)
 
 PagerLens can run **standalone** (the first-run setup code and an admin password, as above) or **federated** with the ecosystem's

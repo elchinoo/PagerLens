@@ -9,9 +9,11 @@ from pathlib import Path
 import psycopg
 from apgkit import insights as kit_insights
 from apgkit import masking
+from apgkit import sealed as sealing
 from apgkit.auth.rp import BINDING_COOKIE, clear_binding, safe_return_to
 from apgkit.config import database_url, env_bool
 from apgkit.guard import SecurityGuard
+from apgkit.vault import sealed_unlocker
 from apgkit.web import is_https, mount_kit_static, public_url
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
@@ -163,14 +165,29 @@ class McpGuard:
 
 
 # Interactive API docs load scripts from a CDN and expose the schema; keep them off.
-app = FastAPI(title="PagerLens", version=__version__, lifespan=lifespan,
+# Sealed boot (APGKIT_SEALED): the app starts sealed (503 except /_seal/*, /healthz) and the lifespan, the database preparation and the
+# vault unlock run when the operator unseals it. Without the blob nothing here changes.
+sealed = sealing.Sealed.from_env()
+app = FastAPI(title="PagerLens", version=__version__, lifespan=sealed.deferred(lifespan),
               docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(McpGuard)
 app.add_middleware(SecurityGuard, csrf_header=CSRF_HEADER, csrf_prefixes=("/api/",), body_prefixes=("/api/", "/v1/"), max_body=MAX_BODY,
                    observe=core.metrics.observe)
+sealing.install(app, sealed)   # after the other middleware so the seal gate is the outermost: nothing runs (or touches the database) while sealed
 app.mount("/mcp", mcp_app)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 mount_kit_static(app)
+
+
+def _prepare_database_when_unsealed(_sealed, _passphrase) -> None:
+    from .cli import prepare_database
+    if prepare_database():
+        raise RuntimeError("database preparation failed (see the server log)")
+
+
+if sealed.enabled:   # callbacks only ever run when sealing is on; registered in order: the schema first, then the vault
+    sealed.on_unsealed(_prepare_database_when_unsealed)
+    sealed.on_unsealed(sealed_unlocker(core.vault, lambda: connect(retries=1)))
 
 
 
