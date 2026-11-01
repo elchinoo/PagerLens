@@ -222,6 +222,23 @@ After a **restart** stored provider keys are locked until you sign in. `pagerlen
 
 Anything in an app's environment, config files or image is readable by whoever breaches the platform. With sealed boot you deploy PagerLens with **one** setting, `APGKIT_SEALED`: a blob encrypted (AES-256-GCM) under an operator passphrase that holds `DATABASE_URL`, the OIDC client secret, the API and LLM keys and anything else secret. Make it with `ecoctl seal` from agentpg-ecosystem. The app starts sealed: it answers `503` except on `/_seal/*`, `/healthz`, `/health` and `/livez`. The operator sends the passphrase (encrypted to a key that exists only in that process); the app then opens the blob, runs the migrations, unlocks the vault with the same passphrase and starts serving. While unsealed the secrets are read from the blob first, so nothing else needs to be set. Without `APGKIT_SEALED` nothing changes. When sealing is on, `PAGERLENS_ENCRYPTION_KEY` is ignored and the vault is created or opened with the passphrase. See the agentpg-kit guide, section 7.3.3.
 
+### Row MACs
+
+Encryption keeps a stolen database unreadable; it does not stop someone who can only **write** to it (stolen database credentials) from planting rows. So the rows that grant access or carry trust also carry a `mac`: an HMAC-SHA256 under a subkey of the vault data key (agentpg-kit `Vault.row_mac`), computed over the columns that decide authority. With sealed boot that key exists only in the process's memory, so a database write alone cannot produce a valid MAC. A row with a missing or wrong MAC is treated as if it were not there and is logged once, with the table and key only (never values; the counter `pagerlens_tampered_rows_total` counts them).
+
+| Table | Signed columns | What a forged row would have done |
+|---|---|---|
+| `web_session`, `api_token` (agentpg-kit) | id or token hash, subject, name, email, roles, source, expiry; name, prefix, scope, revoked | planted an admin session or token, widened a scope, undone a revocation |
+| `llm_account` | id, provider, base URL, encrypted key, chat and embedding model, embedding size | sent prompts and the stored provider key to an attacker host |
+| `runbook` | id, title, category, service, body | put attacker-written "manual steps" in front of a responder or an AI assistant that cites runbooks |
+| `app_setting` (only `embedding_account_id`) | key, value | pointed embeddings (all incident and runbook text) at another account |
+
+Checking happens only while the vault is **unlocked** (always, with sealed boot). While it is locked (development, tests, no vault) nothing is checked and behaviour is unchanged; rows the app writes in that state carry no MAC. Writes by the app sign in the same transaction, updates re-sign only rows that verified before, and `pagerlens rotate-key` / `POST /api/vault/rotate` re-sign the rows that verified under the old key.
+
+**Upgrading.** Existing accounts, the embedding choice and any runbook you added yourself carry no MAC, so they are ignored until you run `pagerlens adopt-rowmacs` once (it asks for the admin password; `PAGERLENS_ADMIN_PASSWORD` works for automation, it is never a command-line argument). It **trusts the database as it is at that moment**: run it only when you believe the database is untouched. Runbooks that ship with PagerLens are signed automatically after unlock, because their text is compared with the code, not trusted. Sessions and API tokens written before this release are signed by the same command, or users sign in again. After `pagerlens reset-admin` the old key is gone: run `adopt-rowmacs` after setting the new password.
+
+**Limits.** A row MAC does not stop: (1) **replay** of an older authentic row, for example from a backup (a revoked-then-restored account, an earlier runbook text); (2) **deleting** rows (denial of service; planted unsigned rows can also crowd out genuine ones, which is why runbook search over-fetches); (3) anything in a **column that is not signed**: display names, last four characters of a key, timestamps, embeddings, incident and telemetry data, the other `app_setting` keys (housekeeping thresholds, bookkeeping), tuning proposals (applying one is off by default, needs a person's approval and re-checks an allow-list of statements) and the kit's vault wraps (protected by the kit's own checks); (4) an attacker who also holds the data key, which is the key the MAC is made from.
+
 ## Single sign-on and roles (the ecosystem identity provider)
 
 PagerLens can run **standalone** (the first-run setup code and an admin password, as above) or **federated** with the ecosystem's
@@ -577,7 +594,7 @@ Point the client at `/mcp` exactly as shown on the **Connect** tab. Make sure th
 
 ### I forgot the admin password
 
-Run `pagerlens reset-admin` where the server can reach the database (on AgentPG: `agentpg sandbox console <sandbox-id>`). It clears the password, the vault and every stored provider key, then restarts the first-run setup.
+Run `pagerlens reset-admin` where the server can reach the database (on AgentPG: `agentpg sandbox console <sandbox-id>`). It clears the password, the vault and every stored provider key, then restarts the first-run setup. Row MACs were made under the old key, so run `pagerlens adopt-rowmacs` after setting the new password (see [Row MACs](#row-macs)).
 
 ### What survives a pause
 

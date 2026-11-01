@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from . import ingest
+from . import ingest, rowmac
 
 WINDOW_MIN = 90        # minutes of telemetry written
 ONSET_MIN = 20         # the failure began this many minutes before 'now'
@@ -297,6 +297,8 @@ def seed_runbooks(conn) -> int:
                 vec, usable = None, False
         row = conn.execute("INSERT INTO runbook (title, category, service, body, embedding) VALUES (%s,%s,%s,%s,%s) "
                            "ON CONFLICT (title) DO NOTHING RETURNING id", (title, category, service, body, vec)).fetchone()
+        if row and rowmac.enforced():
+            rowmac.seal(conn, "runbook", "id=%s", (row["id"],))     # signed in the same transaction (when locked, signed at unlock)
         n += 1 if row else 0
     return n
 

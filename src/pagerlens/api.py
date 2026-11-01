@@ -36,6 +36,7 @@ from . import (
     metrics,
     migrate,
     otlp,
+    rowmac,
     simulator,
     tuning,
     vault,
@@ -66,6 +67,9 @@ def _bind_stored_keys(conn) -> None:
     """Best effort after the vault unlocks: bind provider keys written before contexts existed to their own account."""
     with contextlib.suppress(Exception):
         accounts.upgrade_stored_keys(conn)
+    with contextlib.suppress(Exception):
+        rowmac.sign_builtin_runbooks(conn)      # shipped runbooks seeded while the vault was locked get their MAC (content checked against the code)
+        conn.commit()
 
 
 def _announce_setup_code() -> None:
@@ -179,6 +183,11 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 mount_kit_static(app)
 
 
+def _bind_stored_keys_when_unsealed() -> None:
+    with connect(retries=1) as conn:        # runs after the vault opened: sign the runbooks that were seeded before it did
+        _bind_stored_keys(conn)
+
+
 def _prepare_database_when_unsealed(_sealed, _passphrase) -> None:
     from .cli import prepare_database
     if prepare_database():
@@ -188,6 +197,7 @@ def _prepare_database_when_unsealed(_sealed, _passphrase) -> None:
 if sealed.enabled:   # callbacks only ever run when sealing is on; registered in order: the schema first, then the vault
     sealed.on_unsealed(_prepare_database_when_unsealed)
     sealed.on_unsealed(sealed_unlocker(core.vault, lambda: connect(retries=1)))
+    sealed.on_unsealed(lambda _sealed, _passphrase: _bind_stored_keys_when_unsealed())
 
 
 
@@ -442,7 +452,7 @@ def rotate_vault(body: RotateBody, request: Request, principal=Depends(require("
             raise HTTPException(423, "the vault is locked")
         conn.commit()
         try:
-            counts = core.vault.rotate_data_key(conn, password=body.password)
+            counts = rowmac.rotate_data_key(conn, body.password)   # re-encrypts, then re-signs the rows that verified
         except vault.VaultLocked as exc:
             raise HTTPException(423, str(exc)) from exc
         except vault.VaultError as exc:
@@ -1125,7 +1135,8 @@ def incident_truth(incident_id: int):
 @app.get("/api/runbooks", dependencies=[Depends(require("runbooks:read"))])
 def list_runbooks():
     with connect() as conn:
-        return {"runbooks": conn.execute("SELECT id, title, category, service, body FROM runbook ORDER BY id").fetchall()}
+        rows = conn.execute("SELECT id, title, category, service, body, mac FROM runbook ORDER BY id").fetchall()
+        return {"runbooks": [rowmac.without_mac(r) for r in rowmac.valid("runbook", rows)]}
 
 
 # --- simulator --------------------------------------------------------------------------------------

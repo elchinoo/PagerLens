@@ -23,6 +23,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("serve", help="run the API + MCP server")
     rk = sub.add_parser("rotate-key", help="replace the vault data key and re-encrypt every stored secret (asks for the admin password)")
     rk.add_argument("--confirm", action="store_true", help="required: restart every other replica afterwards")
+    sub.add_parser("adopt-rowmacs", help="sign existing provider accounts, runbooks, the embedding choice, sessions and API tokens that have no "
+                                         "row MAC (trusts the database as it is now; asks for the admin password)")
     sub.add_parser("reset-admin", help="forget the admin password and delete stored provider keys (recovery)")
     sub.add_parser("start", help="container entrypoint: migrate, optionally seed (AUTO_SEED=true), serve")
     args = p.parse_args(argv)
@@ -83,13 +85,16 @@ def main(argv: list[str] | None = None) -> int:
         return _reembed()
     elif args.cmd == "rotate-key":
         return _rotate_key(args.confirm)
+    elif args.cmd == "adopt-rowmacs":
+        return _adopt_rowmacs()
     elif args.cmd == "reset-admin":
         from . import auth
         from .db import connect
 
         with connect() as conn:
             auth.reset_admin(conn)
-        print("admin password, vault and stored provider keys were cleared; the setup code flow is active again")
+        print("admin password, vault and stored provider keys were cleared; the setup code flow is active again. Row MACs were under the "
+              "old data key: after setting the new admin password run `pagerlens adopt-rowmacs`")
     elif args.cmd == "serve":
         _serve()
     elif args.cmd == "start":
@@ -154,7 +159,7 @@ def _rotate_key(confirm: bool) -> int:
     import logging
     import os
 
-    from . import accounts, core
+    from . import accounts, core, rowmac
     from .db import connect
 
     if not confirm:
@@ -177,12 +182,41 @@ def _rotate_key(confirm: bool) -> int:
         conn.commit()
         accounts.upgrade_stored_keys(conn)
         try:
-            counts = core.vault.rotate_data_key(conn, password=password)
+            counts = rowmac.rotate_data_key(conn, password)      # re-encrypts, then re-signs the rows that verified
         except Exception as exc:  # noqa: BLE001 - nothing was changed: the rotation is one transaction
             print(f"rotation failed, nothing was changed: {type(exc).__name__}: {exc}", file=sys.stderr)
             return 1
     logging.getLogger("pagerlens.security").warning("vault data key rotated from the command line; re-encrypted %s", counts)
     print(f"data key rotated; re-encrypted: {counts or 'nothing'}. Restart every other replica now.")
+    return 0
+
+
+def _adopt_rowmacs() -> int:
+    """Sign every covered row that has no row MAC (a database that existed before row MACs). It TRUSTS THE DATABASE AS IT IS AT THIS
+    MOMENT: run it once, after migrating, on a database you believe untampered. The admin password comes from a prompt (or
+    PAGERLENS_ADMIN_PASSWORD for automation), never from an argument; nothing secret is printed."""
+    import getpass
+    import os
+
+    from . import core, rowmac
+    from .db import connect
+
+    with connect() as conn:
+        if not core.vault.is_initialized(conn):
+            print("there is no vault yet: nothing can be signed (row MACs are checked only while the vault is unlocked)", file=sys.stderr)
+            return 1
+        if core.vault.has_password_wrap(conn) and not core.vault.is_unlocked():
+            password = os.environ.get("PAGERLENS_ADMIN_PASSWORD") or getpass.getpass("admin password: ")
+            if not core.vault.unlock_with_password(conn, password):
+                print("wrong admin password", file=sys.stderr)
+                return 1
+        elif not core.vault.is_unlocked() and not core.vault.try_unlock_with_platform_secret(conn):
+            print("the vault is locked and no platform secret is set", file=sys.stderr)
+            return 1
+        conn.commit()
+        counts = rowmac.adopt(conn)
+    print("signed rows without a MAC: " + ", ".join(f"{t} {n}" for t, n in counts.items()) +
+          ". This trusted the database as it was now; rows written by anything else from here on are ignored.")
     return 0
 
 

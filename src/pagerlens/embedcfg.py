@@ -5,8 +5,8 @@ it just means external embeddings are unavailable until the admin signs in.
 """
 from dataclasses import dataclass
 
+from . import rowmac, vault
 from . import settings_store as store
-from . import vault
 from .config import get_settings
 
 SETTING = "embedding_account_id"
@@ -75,7 +75,7 @@ def activate(conn, account: int | None) -> EmbeddingConfig:
     if account is None:
         store.delete(conn, SETTING)
     else:
-        store.put(conn, SETTING, str(account))
+        rowmac.put_setting(conn, SETTING, str(account))   # signed in the same transaction
     conn.commit()
     set_active(cfg)
     return current()
@@ -89,7 +89,7 @@ def ensure_loaded(conn) -> None:
     from .accounts import embedding_config_for  # local import: accounts imports this module
 
     try:
-        pointer = store.get(conn, SETTING)
+        pointer = rowmac.get_setting(conn, SETTING)         # an unsigned pointer is ignored while the vault is unlocked
         cfg = embedding_config_for(conn, int(pointer)) if pointer else None
     except Exception:  # noqa: BLE001 - missing tables on a fresh database, or a deleted account
         conn.rollback()

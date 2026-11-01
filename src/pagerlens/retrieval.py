@@ -12,7 +12,7 @@ import logging
 
 from pgvector import Vector
 
-from . import embedcfg
+from . import embedcfg, rowmac
 from .embeddings import embed
 
 RRF_K = 60
@@ -54,10 +54,11 @@ def search_runbooks(conn, query: str, *, category: str | None = None, service: s
             WHERE (%(cat)s::text IS NULL OR category = %(cat)s) AND embedding IS NOT NULL
             ORDER BY embedding <=> %(vec)s LIMIT 20""" if vec is not None else
                "SELECT NULL::bigint AS id, NULL::bigint AS r WHERE false")
-    params = {"q": query[:300], "cat": category, "svc": service, "k": RRF_K, "n": limit}
+    # Rows without a valid MAC are dropped below, so ask for more than `limit`: planted rows must not crowd the genuine ones out.
+    params = {"q": query[:300], "cat": category, "svc": service, "k": RRF_K, "n": limit * 5 if rowmac.enforced() else limit}
     if vec is not None:
         params["vec"] = vec
-    return conn.execute(
+    rows = conn.execute(
         f"""
         WITH vec AS (
             {vec_cte}),
@@ -70,13 +71,14 @@ def search_runbooks(conn, query: str, *, category: str | None = None, service: s
             SELECT COALESCE(vec.id, lex.id) AS id,
                    COALESCE(1.0 / (%(k)s + vec.r), 0) + COALESCE(1.0 / (%(k)s + lex.r), 0) AS score
             FROM vec FULL OUTER JOIN lex ON vec.id = lex.id)
-        SELECT r.id, r.title, r.category, r.service, r.body, f.score
+        SELECT r.id, r.title, r.category, r.service, r.body, r.mac, f.score
         FROM fused f JOIN runbook r ON r.id = f.id
         WHERE (%(svc)s::text IS NULL OR r.service IS NULL OR r.service = %(svc)s)
         ORDER BY f.score DESC LIMIT %(n)s
         """,
         params,
     ).fetchall()
+    return [rowmac.without_mac(r) for r in rowmac.valid("runbook", rows)][:limit]
 
 
 def similar_incidents(conn, text: str, *, exclude_id: int | None = None, limit: int = 5,

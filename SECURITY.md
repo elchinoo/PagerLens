@@ -34,6 +34,13 @@ affected version or commit.
 - `/mcp` accepts bearer credentials that hold `mcp:use` (`read` and `full` tokens, and federated people or services allowed to),
   never browser cookies. The tools that change state (`investigate`, `add_note`, `mark_root_cause`) re-validate the caller's
   own credential inside the tool, so a read-only token cannot write even through a client that offers the tool.
+- **Row MACs.** Sessions, API tokens, provider accounts, runbooks and the embedding choice carry an HMAC under a subkey of the vault
+  data key over the columns that decide authority (README, "Row MACs"). While the vault is unlocked, which sealed boot guarantees, a row
+  with no MAC or a wrong one is treated as missing, so a database write alone (stolen credentials) cannot plant a session or token,
+  widen a scope, redirect a provider account's base URL, or insert a runbook. Limits: an older authentic row can be replayed from a
+  backup, rows can be deleted, unsigned columns (names, timestamps, embeddings, telemetry, other settings, tuning proposals) are not
+  covered, and an attacker who holds the data key can sign. Rows written before this feature are ignored until `pagerlens adopt-rowmacs`
+  signs them, which trusts the database as it is at that moment.
 - An optional static `PAGERLENS_API_KEY` remains for automation. It is a full-access credential held in the
   environment or a file: treat it like a password, or leave it unset and use tokens.
 - Failed sign-ins and bad credentials are rate limited (10 per minute per client address, in memory, per

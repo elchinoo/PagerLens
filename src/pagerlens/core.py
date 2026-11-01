@@ -85,6 +85,8 @@ APP_AUTH = AppAuth(APP, fed.client_id, ROLE_PERMISSIONS, SCOPE_PERMISSIONS)
 
 def _on_reset(conn) -> None:
     conn.execute("UPDATE llm_account SET api_key_enc = NULL, api_key_last4 = NULL")
+    from . import rowmac
+    rowmac.clear_all(conn)   # the old data key is gone: no row MAC can verify any more; `pagerlens adopt-rowmacs` signs afresh
 
 
 local = LocalAuth(APP_AUTH, env_prefix="PAGERLENS", token_prefix="pl_", token_scopes={"read", "ingest", "metrics", "full"}, vault=vault,

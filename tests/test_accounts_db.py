@@ -208,13 +208,14 @@ def test_stored_keys_are_bound_to_their_account_and_survive_rotation(admin):
 def test_legacy_rows_are_read_and_then_bound_to_their_account(admin):
     from cryptography.fernet import Fernet
 
-    from pagerlens import accounts
+    from pagerlens import accounts, rowmac
     a = new_account(admin, api_key=None).json()["id"]
     with connect() as c:
         key = core.vault._data_key                                              # a Fernet token as the pre-context kit wrote it
         import base64
         legacy = Fernet(base64.urlsafe_b64encode(key)).encrypt(PROVIDER_KEY.encode()).decode()
         c.execute("UPDATE llm_account SET api_key_enc=%s, api_key_last4='x' WHERE id=%s", (legacy, a))
+        rowmac.seal(c, "llm_account", "id=%s", (a,))                            # what `adopt-rowmacs` does for a legacy row
         c.commit()
         assert accounts.chat_config_for(c, a).api_key() == PROVIDER_KEY         # old row still readable
         assert accounts.upgrade_stored_keys(c) == 1
@@ -223,6 +224,7 @@ def test_legacy_rows_are_read_and_then_bound_to_their_account(admin):
         assert accounts.upgrade_stored_keys(c) == 0                             # idempotent
         # a v2 token written without a context (empty) is bound too
         c.execute("UPDATE llm_account SET api_key_enc=%s WHERE id=%s", (vault.encrypt(PROVIDER_KEY), a))
+        rowmac.seal(c, "llm_account", "id=%s", (a,))
         c.commit()
         assert accounts.chat_config_for(c, a).api_key() == PROVIDER_KEY
         assert accounts.upgrade_stored_keys(c) == 1

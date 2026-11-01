@@ -1,8 +1,7 @@
 """Provider accounts (OpenAI-compatible endpoints). Keys are encrypted at rest and never returned."""
 from dataclasses import dataclass
 
-from . import embedcfg, vault
-from . import settings_store as store
+from . import embedcfg, rowmac, vault
 from .config import get_settings
 from .netguard import check_url
 
@@ -56,8 +55,12 @@ class ChatConfig:
         return vault.decrypt_compat(self.key_enc, self.key_context) if self.key_enc else self.key_plain
 
 
-_PUBLIC = ("id, name, provider, base_url, (api_key_enc IS NOT NULL) AS has_key, api_key_last4, chat_model, "
-           "embedding_model, embedding_dim, created_at, updated_at")
+_PUBLIC_COLUMNS = ("id", "name", "provider", "base_url", "has_key", "api_key_last4", "chat_model", "embedding_model", "embedding_dim",
+                   "created_at", "updated_at")
+
+
+def _public(row: dict) -> dict:
+    return {c: (row["api_key_enc"] is not None if c == "has_key" else row[c]) for c in _PUBLIC_COLUMNS}
 
 
 def env_account() -> dict | None:
@@ -71,14 +74,15 @@ def env_account() -> dict | None:
 
 
 def list_accounts(conn) -> list[dict]:
-    return conn.execute(f"SELECT {_PUBLIC} FROM llm_account ORDER BY name").fetchall()
+    rows = rowmac.valid("llm_account", conn.execute("SELECT * FROM llm_account ORDER BY name").fetchall())   # a row without a valid MAC is absent
+    return [_public(r) for r in rows]
 
 
 def get_account(conn, account_id: int) -> dict:
-    row = conn.execute(f"SELECT {_PUBLIC} FROM llm_account WHERE id=%s", (account_id,)).fetchone()
-    if not row:
+    row = conn.execute("SELECT * FROM llm_account WHERE id=%s", (account_id,)).fetchone()
+    if not row or not rowmac.verify("llm_account", row):
         raise AccountError("account not found")
-    return row
+    return _public(row)
 
 
 def _require_vault(conn) -> None:
@@ -112,6 +116,7 @@ def create(conn, *, name: str, provider: str, base_url: str, api_key: str | None
         "embedding_dim) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
         (new_id, name, provider, base_url, enc, last4, _clean(chat_model), _clean(embedding_model), embedding_dim),
     ).fetchone()
+    rowmac.seal(conn, "llm_account", "id=%s", (new_id,))      # signed in the same transaction as the insert
     conn.commit()
     return row["id"]
 
@@ -135,7 +140,7 @@ def update(conn, account_id: int, *, name: str, provider: str, base_url: str, ap
         args += [vault.encrypt(key, key_context(account_id)), key[-4:]]
     elif clear_key:
         sets += ["api_key_enc=NULL", "api_key_last4=NULL"]
-    conn.execute(f"UPDATE llm_account SET {', '.join(sets)} WHERE id=%s", (*args, account_id))
+    rowmac.update(conn, "llm_account", ", ".join(sets), tuple(args), "id=%s", (account_id,))   # re-signs the row
     conn.commit()
     if embedcfg.current().account_id == account_id:  # the active embedder changed: reload it
         embedcfg.reset()
@@ -152,7 +157,7 @@ def delete(conn, account_id: int) -> None:
 
 def _raw(conn, account_id: int) -> dict:
     row = conn.execute("SELECT * FROM llm_account WHERE id=%s", (account_id,)).fetchone()
-    if not row:
+    if not row or not rowmac.verify("llm_account", row):      # a planted or edited account is never used: same as a missing one
         raise AccountError("account not found")
     return row
 
@@ -183,7 +188,7 @@ def chat_config_for(conn, ref: int | str) -> ChatConfig:
 
 
 def active_embedding_ref(conn) -> int | str | None:
-    pointer = store.get(conn, embedcfg.SETTING)
+    pointer = rowmac.get_setting(conn, embedcfg.SETTING)
     return int(pointer) if pointer else ("env" if env_account() else None)
 
 
@@ -191,7 +196,9 @@ def upgrade_stored_keys(conn) -> int:
     """After the vault is unlocked: bind every stored key to its account (rows written before contexts existed carry no binding).
     Idempotent and cheap; returns how many rows were rewritten. A key that cannot be opened is left alone."""
     n = 0
-    for row in conn.execute("SELECT id, api_key_enc FROM llm_account WHERE api_key_enc IS NOT NULL ORDER BY id").fetchall():
+    for row in conn.execute("SELECT * FROM llm_account WHERE api_key_enc IS NOT NULL ORDER BY id").fetchall():
+        if not rowmac.verify("llm_account", row):
+            continue                                       # not a row this app wrote (or not adopted yet): leave it alone
         ctx = key_context(row["id"])
         try:
             vault.decrypt(row["api_key_enc"], ctx)
@@ -206,8 +213,8 @@ def upgrade_stored_keys(conn) -> int:
             plain = vault.decrypt_compat(row["api_key_enc"], ctx)
         except vault.VaultError:
             continue
-        conn.execute("UPDATE llm_account SET api_key_enc=%s WHERE id=%s AND api_key_enc=%s",
-                     (vault.encrypt(plain, ctx), row["id"], row["api_key_enc"]))
+        rowmac.update(conn, "llm_account", "api_key_enc=%s", (vault.encrypt(plain, ctx),),
+                      "id=%s AND api_key_enc=%s", (row["id"], row["api_key_enc"]))
         n += 1
     conn.commit()
     return n

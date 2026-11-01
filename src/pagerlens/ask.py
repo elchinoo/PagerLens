@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 
 from apgkit import insights as kit_insights
 
-from . import incidents, metrics, retrieval, tools
+from . import incidents, metrics, retrieval, rowmac, tools
 from .accounts import ChatConfig
 from .chat import chat
 from .llm_agent import FENCE_CLOSE, FENCE_OPEN
@@ -467,7 +467,8 @@ def _exists(conn, kind: str, ident: int) -> dict | None:
                             "LEFT JOIN service s ON s.id = i.service_id WHERE i.id=%s", (ident,)).fetchone()
     if kind == "evidence":
         return conn.execute("SELECT id, incident_id, source, summary FROM observation WHERE id=%s", (ident,)).fetchone()
-    return conn.execute("SELECT id, title, category FROM runbook WHERE id=%s", (ident,)).fetchone()
+    row = conn.execute("SELECT id, title, category, service, body, mac FROM runbook WHERE id=%s", (ident,)).fetchone()
+    return rowmac.without_mac(row) if rowmac.verify("runbook", row) else None   # a runbook without a valid MAC cannot be cited
 
 
 def verify_citations(conn, text: str, seen: dict[str, set]) -> dict:
