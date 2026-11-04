@@ -152,15 +152,19 @@ async function renderDetail(box, id, soft = false) {
   const mode = h("select", { id: "inv-mode", "aria-label": "Method" },
     h("option", { value: "rules" }, "Rules (no AI, free)"),
     h("option", { value: "hybrid" }, "Rules + AI (recommended)"),
-    h("option", { value: "llm" }, "AI only"));
-  try { const saved = localStorage.getItem("pagerlens.mode"); if (["rules", "hybrid", "llm"].includes(saved)) mode.value = saved; } catch { /* storage unavailable */ }
+    h("option", { value: "llm" }, "AI only"),
+    h("option", { value: "aidb_hybrid" }, "Rules + AIDB agent (preview, needs AIDB setup)"),
+    h("option", { value: "aidb" }, "AIDB agent only (preview, needs AIDB setup)"));
+  try { const saved = localStorage.getItem("pagerlens.mode"); if (["rules", "hybrid", "llm", "aidb_hybrid", "aidb"].includes(saved)) mode.value = saved; } catch { /* storage unavailable */ }
   const acct = h("select", { id: "inv-account", "aria-label": "AI account", hidden: true });
   const acctNote = h("p", { class: "hint", hidden: true }, "");
   const syncMode = () => {
-    const ai = mode.value !== "rules";
+    const ai = mode.value === "llm" || mode.value === "hybrid";
+    const aidb = mode.value.startsWith("aidb");
     acct.hidden = !ai;
-    acctNote.hidden = !ai;
-    acctNote.textContent = !ai ? "" : (acct.dataset.count === "0"
+    acctNote.hidden = !ai && !aidb;
+    acctNote.textContent = aidb ? "The AIDB agent runs inside the database over read-only evidence views; an operator must have run `pagerlens aidb-setup`. Its citations are checked here before they count. It uses the chat model AIDB was given, not an account from this list."
+      : !ai ? "" : (acct.dataset.count === "0"
       ? "No chat account yet. Add one under Settings (the key is stored encrypted)."
       : "The AI uses read-only tools, cites evidence and is checked before it counts. It sends log excerpts to the provider and spends its credit.");
   };
@@ -174,11 +178,12 @@ async function renderDetail(box, id, soft = false) {
   }
   mode.addEventListener("change", () => { syncMode(); try { localStorage.setItem("pagerlens.mode", mode.value); } catch { /* ignore */ } });
   const go = h("button", { class: "primary", type: "button", onclick: async () => {
-    if (mode.value !== "rules" && !acct.value) { toast("Choose an AI account first (Settings > Add account).", true); return; }
+    const needsAccount = mode.value === "llm" || mode.value === "hybrid";
+    if (needsAccount && !acct.value) { toast("Choose an AI account first (Settings > Add account).", true); return; }
     setBusy(go, true, mode.value === "rules" ? "Investigating…" : "Investigating (the AI takes 10-60 s)…");
     investigating = true;
     try {
-      const r = await api(`/api/incidents/${id}/investigate`, { method: "POST", json: { mode: mode.value, use_memory: memory.checked, account: mode.value === "rules" ? null : acct.value } });
+      const r = await api(`/api/incidents/${id}/investigate`, { method: "POST", json: { mode: mode.value, use_memory: memory.checked, account: needsAccount ? acct.value : null } });
       const warn = r.runs[0] && r.runs[0].warning;
       toast(warn ? `Finished with a warning: ${warn}` : "Investigation finished", Boolean(warn));
       investigating = false;

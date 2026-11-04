@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from . import (
     __version__,
     accounts,
+    aidb_mode,
     ask,
     core,
     dashboard,
@@ -70,6 +71,8 @@ def _bind_stored_keys(conn) -> None:
     with contextlib.suppress(Exception):
         rowmac.sign_builtin_runbooks(conn)      # shipped runbooks seeded while the vault was locked get their MAC (content checked against the code)
         conn.commit()
+    with contextlib.suppress(Exception):
+        aidb_mode.verify_now(conn)              # AIDB mode: compare the operator's seals with the catalog now that the vault key is available
 
 
 def _announce_setup_code() -> None:
@@ -223,13 +226,19 @@ def healthz():
     return {"status": "ok", "version": __version__}
 
 
+def aidb_state() -> dict:
+    """AIDB mode as /readyz shows it: off, not-set-up, unverified, ready or tampered. Optional, so it never makes the app unready."""
+    with connect(retries=1) as conn:
+        return aidb_mode.health(conn)
+
+
 @app.get("/readyz")
 def readyz():
     try:
         with connect(retries=1) as conn:
             conn.execute("SELECT 1")
         # masking: report only (last re-assert, tables found open before it); drift never makes the app unready
-        return {"status": "ready", "masking": masking.status()}
+        return {"status": "ready", "masking": masking.status(), "aidb": aidb_state()}
     except Exception:  # noqa: BLE001 - database may be waking; never echo connection details
         return JSONResponse({"status": "waking-database"}, status_code=503)
 
@@ -789,7 +798,7 @@ def ingest_alert(body: AlertBody):
 # --- incidents, investigation, learning ---------------------------------------------------------
 
 class InvestigateBody(BaseModel):
-    mode: str = Field(default="rules", pattern="^(rules|llm|hybrid)$")
+    mode: str = Field(default="rules", pattern="^(rules|llm|hybrid|aidb|aidb_hybrid)$")
     use_memory: bool = True
     account: str | None = Field(default=None, pattern=r"^(env|\d{1,12})$")
 
@@ -1072,10 +1081,11 @@ def get_incident(incident_id: int):
 @app.post("/api/incidents/{incident_id}/investigate", dependencies=[Depends(require("incidents:investigate"))])
 def investigate(incident_id: int, body: InvestigateBody):
     """rules: deterministic. llm: a model drives the read-only tools. hybrid: both, reconciled. The AI modes use
-    one of your chat accounts and spend its credit; the key is checked before anything runs (423 if locked)."""
+    one of your chat accounts and spend its credit; the key is checked before anything runs (423 if locked). aidb and aidb_hybrid run an
+    AIDB agent over read-only evidence views (needs `pagerlens aidb-setup`; no chat account: the model is the one AIDB was given)."""
     with _translate(), connect_vector() as conn:
         cfg = None
-        if body.mode != "rules":
+        if body.mode in ("llm", "hybrid"):
             if not body.account:
                 raise HTTPException(422, "choose a chat account for the AI modes")
             cfg = accounts.chat_config_for(conn, _ref(body.account))
@@ -1088,6 +1098,22 @@ def investigate(incident_id: int, body: InvestigateBody):
             raise
         metrics.INVESTIGATIONS.labels(body.mode, "done").inc()
         return {"run_id": run_id, **incidents.get_incident(conn, incident_id)}
+
+
+@app.get("/api/aidb/status", dependencies=[Depends(require("incidents:read"))])
+def aidb_status():
+    """AIDB mode in one object: the retrieval backend asked for and in effect, whether the agent and knowledge bases exist, and whether
+    their sealed definitions still verify. Plain Postgres answers `{"state": "off"}`."""
+    with _translate(), connect() as conn:
+        return aidb_mode.health(conn)
+
+
+@app.get("/api/aidb/governance", dependencies=[Depends(require("settings:manage"))])
+def aidb_governance(window: str = Query("24 hours", pattern=r"^\d{1,3} (minutes|hours|days)$")):
+    """The governance panel's data: what the agent's purpose may read, verification of the seals, and the tool calls AIDB's purpose
+    denied (`aidb.decisions`, read from aidb_otel.traces). Needs telemetry on and SELECT on aidb_otel.traces (aidb-setup grants both)."""
+    with _translate(), connect() as conn:
+        return aidb_mode.governance(conn, window=window)
 
 
 @app.get("/api/incidents/{incident_id}/telemetry", dependencies=[Depends(require("incidents:read"))])

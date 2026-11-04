@@ -118,13 +118,13 @@ def ask(question: str, ctx: Context, conversation_id: str | None = None) -> dict
 @mcp.tool()
 def investigate(incident_id: int, ctx: Context, use_memory: bool = True, mode: str = "rules",
                 account: str | None = None) -> dict:
-    """Run a bounded, read-only investigation (needs a full-access token or the investigate permission). mode is rules (default), llm or hybrid;
-    the AI modes need `account` (a chat account id or "env") and spend that provider's credit. Returns the ranked
+    """Run a bounded, read-only investigation (needs a full-access token or the investigate permission). mode is rules (default), llm, hybrid, aidb or aidb_hybrid;
+    llm and hybrid need `account` (a chat account id or "env") and spend that provider's credit; aidb and aidb_hybrid use the AIDB agent an operator set up. Returns the ranked
     hypotheses and the report."""
     _require(ctx, "incidents:investigate")
     with connect_vector() as conn:
         cfg = None
-        if mode != "rules":
+        if mode in ("llm", "hybrid"):
             if not account:
                 raise ToolError("the AI modes need an account (a chat account id from the web app, or \"env\")")
             try:

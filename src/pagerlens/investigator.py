@@ -12,15 +12,16 @@ import json
 import re
 from datetime import datetime, timedelta
 
-from . import llm_agent, retrieval, tools
+from . import aidb_mode, llm_agent, retrieval, tools
 from .accounts import ChatConfig
 from .investigator_core import CATEGORIES, MAX_TOOL_CALLS, Budget, Recorder, call_tool
 from .llm_http import LLMError
 from .tools import Ctx, ToolError
 
 MAX_LLM_TOOL_CALLS = 12
-MODES = ("rules", "llm", "hybrid")
-__all__ = ["CATEGORIES", "MAX_TOOL_CALLS", "MODES", "Budget", "Recorder", "ToolError", "call_tool", "investigate"]
+MODES = ("rules", "llm", "hybrid", "aidb", "aidb_hybrid")
+AIDB_MODES = ("aidb", "aidb_hybrid")
+__all__ = ["AIDB_MODES", "CATEGORIES", "MAX_TOOL_CALLS", "MODES", "Budget", "Recorder", "ToolError", "call_tool", "investigate"]
 
 _POOL = re.compile(r"pool|too many connections|timeout acquiring connection|connection.*exhaust", re.I)
 _OOM = re.compile(r"OutOfMemory|OOMKilled|heap space|out of memory", re.I)
@@ -428,7 +429,9 @@ def _report(incident, S, ents, timeline, runbooks, similar, unrelated, calls, ag
         if agent.summary:
             lines += ["- AI summary (written by a model; verify against the evidence): " + agent.summary]
         u = agent.usage
-        lines += [f"- AI usage: {u['llm_calls']} model call(s), {u['prompt_tokens']} prompt and {u['completion_tokens']} completion tokens."]
+        lines += ["- AI usage: one AIDB agent conversation; its model calls are metered by AIDB and the gateway, not here."
+                  if mode in AIDB_MODES else
+                  f"- AI usage: {u['llm_calls']} model call(s), {u['prompt_tokens']} prompt and {u['completion_tokens']} completion tokens."]
         for w in agent.warnings:
             lines.append(f"- Warning: {w}.")
         lines.append("")
@@ -460,30 +463,39 @@ def investigate(conn, incident_id: int, *, mode: str = "rules", use_memory: bool
     """Run one investigation and return its run id. Raises ToolError for an unknown incident."""
     if mode not in MODES:
         raise ValueError(f"mode must be one of: {', '.join(MODES)}")
-    if mode != "rules" and chat_cfg is None:
+    if mode in ("llm", "hybrid") and chat_cfg is None:
         raise ValueError(f"mode '{mode}' needs a chat account")
+    if mode in AIDB_MODES:
+        try:
+            aidb_mode.agent_ready(conn)           # before a run exists: an unusable agent is a 422, not a failed run
+        except aidb_mode.AidbModeError as exc:
+            raise ValueError(str(exc)) from exc
     ctx = tools.make_ctx(conn, incident_id)
     budget = Budget()
     run_id = conn.execute("INSERT INTO run (incident_id, mode, use_memory, account, budget) VALUES (%s,%s,%s,%s,%s::jsonb) RETURNING id",
                           (incident_id, mode, use_memory, account, json.dumps(
-                              {"max_tool_calls": budget.max_calls, **({"max_llm_tool_calls": MAX_LLM_TOOL_CALLS} if mode != "rules" else {})}))
+                              {"max_tool_calls": budget.max_calls, **({"max_llm_tool_calls": MAX_LLM_TOOL_CALLS} if mode in ("llm", "hybrid") else {}),
+                               **({"aidb_agent": "pagerlens_investigator", "max_agent_iterations": 12} if mode in AIDB_MODES else {})}))
                           ).fetchone()["id"]
     conn.execute("UPDATE incident SET status='investigating' WHERE id=%s AND status='open'", (incident_id,))
     conn.commit()
     rec = Recorder(conn, run_id, incident_id)
     try:
         S = ctx.service
-        rules = _rules_phase(ctx, rec, budget, use_memory) if mode in ("rules", "hybrid") else None
+        rules = _rules_phase(ctx, rec, budget, use_memory) if mode in ("rules", "hybrid", "aidb_hybrid") else None
         agent, warnings = None, []
         llm_budget = Budget(MAX_LLM_TOOL_CALLS)
-        if mode in ("llm", "hybrid"):
+        if mode in ("llm", "hybrid", "aidb", "aidb_hybrid"):
             index = [{"observation_id": r["id"], "source": r["source"], "summary": r["summary"]}
                      for r in conn.execute("SELECT id, source, summary FROM observation WHERE run_id=%s ORDER BY id", (run_id,))] if rules else None
             try:
-                agent = llm_agent.run_agent(ctx, rec, llm_budget, chat_cfg, evidence_index=index, allow_memory=use_memory)
+                if mode in AIDB_MODES:
+                    agent = aidb_mode.run_agent(ctx, rec, evidence_index=index)
+                else:
+                    agent = llm_agent.run_agent(ctx, rec, llm_budget, chat_cfg, evidence_index=index, allow_memory=use_memory)
                 warnings += agent.warnings
-            except LLMError as exc:
-                if mode == "llm":
+            except (LLMError, aidb_mode.AidbModeError) as exc:
+                if mode in ("llm", "aidb"):
                     raise
                 warnings.append(f"the AI step failed ({exc}); the rules result is shown on its own")
         ents = _combine(mode, rules, agent, S)

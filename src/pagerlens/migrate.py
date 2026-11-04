@@ -7,7 +7,7 @@ from pathlib import Path
 
 from pgvector import Vector
 
-from . import hardening, live
+from . import aidb_views, hardening, live
 from .config import get_settings
 
 MIGRATIONS = Path(__file__).resolve().parent / "migrations"
@@ -27,7 +27,7 @@ def run() -> list[str]:
 
     # The hardening hook runs last, on every start: AgentPG re-grants SELECT to the read-only role on each NEW table.
     applied = kit_migrate.run(db, MIGRATIONS, extensions=("vector",), replacements={"{{EMBEDDING_DIM}}": str(get_settings().embedding_dim)},
-                              after_migrate=[auth_schema, live.install, hardening.apply])
+                              after_migrate=[auth_schema, live.install, aidb_views.install, hardening.apply])
     return applied
 
 

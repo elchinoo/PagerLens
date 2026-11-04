@@ -239,6 +239,70 @@ Checking happens only while the vault is **unlocked** (always, with sealed boot)
 
 **Limits.** A row MAC does not stop: (1) **replay** of an older authentic row, for example from a backup (a revoked-then-restored account, an earlier runbook text); (2) **deleting** rows (denial of service; planted unsigned rows can also crowd out genuine ones, which is why runbook search over-fetches); (3) anything in a **column that is not signed**: display names, last four characters of a key, timestamps, embeddings, incident and telemetry data, the other `app_setting` keys (housekeeping thresholds, bookkeeping), tuning proposals (applying one is off by default, needs a person's approval and re-checks an allow-list of statements) and the kit's vault wraps (protected by the kit's own checks); (4) an attacker who also holds the data key, which is the key the MAC is made from.
 
+## AIDB mode (opt-in, preview)
+
+[EDB AI Accelerator (AIDB)](https://www.enterprisedb.com/docs/aidb/latest/) puts pipelines, knowledge bases, agents and governance inside Postgres. PagerLens can use it in two independent ways. **Both are off by default and plain Postgres keeps working exactly as before** (every test of the default path is unchanged); nothing below is needed to run PagerLens.
+
+| Switch | Values | What it changes |
+|---|---|---|
+| `PAGERLENS_RETRIEVAL_BACKEND` | `app` (default), `aidb` | Where runbook search and incident recall come from (agentpg-kit `apgkit.retrieval.select`). |
+| the investigator method | `rules`, `llm`, `hybrid` (defaults, unchanged) plus `aidb` and `aidb_hybrid` | An AIDB agent investigates instead of the app-side loop. |
+
+### Before and after
+
+| | Default (`app`) | AIDB mode |
+|---|---|---|
+| Runbooks | pgvector column filled by this process (`runbook.embedding`), our hybrid vector + full-text fusion | A live AIDB pipeline over `runbook.kb_text` keeps a knowledge base current; retrieval is AIDB's hybrid search. Insert a runbook and it is searchable seconds later with no app code |
+| Incident memory | `incident.embedding`, re-embedded by `remember_incident` | A live pipeline over `incident_memory` (symptom and error signatures of resolved incidents; a trigger keeps it in step with `incident`) |
+| Embedding model and size | Whatever `EMBEDDING_DIM`/the active account says; a size change is a reconciliation job | The pipeline owns its model (default AIDB's local `bge-small-en-v1.5-f16`, 384 dimensions, no key); a size change cannot strand the vectors |
+| The AI investigator | A bounded loop in `llm_agent.py` over registered Python tools | An AIDB agent whose tools are custom SQL over read-only **evidence views**, run under a purpose bound to a role that holds SELECT on those views and nothing else |
+| "Never changes your systems" | The tools only SELECT (code) | Also a grant boundary: the purpose role can read six views, no table, and write nothing; Postgres refuses the rest and AIDB records the refusal |
+| Citations | Observation ids, checked here | Evidence ids (`deploy:12`, `log:345`, `metric:...`), checked here against the views for the incident's window; each verified id becomes an observation of the run |
+
+What stays in the application whichever way the switches are set: row MACs on runbooks (an AIDB hit is only a key: the row is read back and its MAC verified here), citation verification, scrubbing and `<untrusted_data>` fencing, the bounded budget, and every human decision.
+
+### Setting it up (an operator step)
+
+The runtime role stays unprivileged (`aidb_users` plus a few grants). Everything that needs more is done once by an operator:
+
+```bash
+# the application's own DATABASE_URL (role that owns the tables) plus an administrator's connection string for this ONE command:
+export PAGERLENS_AIDB_ADMIN_DSN=...        # or omit it and type it at the hidden prompt; never stored, logged or put in compose/env files
+export LLM_BASE_URL=https://llm-gateway.example/v1 LLM_CHAT_MODEL=chat-default LLM_API_KEY=...   # only for the agent (see limits)
+pagerlens aidb-setup                       # asks for the admin password (PAGERLENS_ADMIN_PASSWORD for automation); idempotent
+pagerlens aidb-status                      # pipelines, agent, purpose, denials, and whether the seals verify (exit 1 on a problem)
+export PAGERLENS_RETRIEVAL_BACKEND=aidb    # then restart, or wait: a fallback is re-examined every minute
+```
+
+`aidb-setup` creates the pipelines `pl_runbook` and `pl_incident` (live), the purpose `pagerlens_investigator` (role `aidb_p_pagerlens_investigator`, SELECT on the `pl_ev_*` views), seven SQL tools, and, when a gateway is configured, the model `pl_chat` and the agent. It also grants the runtime role `aidb_users`, SELECT on the two knowledge-base tables, USAGE on the gateway credential, SELECT on `aidb_otel.traces` (for the governance panel) and turns telemetry on. Run it again and it reports `unchanged` for every object. The app's migrations create the views (as the table owner); the seal table is created there too.
+
+At runtime the app only **verifies and reports**. `/readyz` gets an `aidb` object (`off`, `unavailable`, `not-set-up`, `unverified`, `ready` or `tampered`, plus the backend in effect) and never turns an otherwise ready app unready. `GET /api/aidb/status` (read permission) shows the same; `GET /api/aidb/governance` (`settings:manage`) feeds the **AIDB mode** panel in Settings: what the purpose may read, the verification result, and the tool calls the purpose denied (`aidb.decisions`, from `aidb_otel.traces`).
+
+**Falling back.** Asking for `aidb` where it cannot work (plain Postgres, not set up, no grant, a pipeline that fails verification) logs `RETRIEVAL BACKEND FALLBACK` at ERROR level and uses the app backend; a failure at query time falls back for that call. The `aidb` and `aidb_hybrid` methods are refused before a run exists (HTTP 422) when the agent is missing or fails verification; in `aidb_hybrid` a failure while the agent runs keeps the rules result, with a warning, as `hybrid` does.
+
+**Evidence views.** `pl_ev_services`, `pl_ev_incidents`, `pl_ev_deploys`, `pl_ev_alerts`, `pl_ev_logs`, `pl_ev_metrics`: masked like the read-only role's views (e-mail addresses, key-like strings and JWTs redacted, author names reduced to an initial), free text already fenced and truncated, root causes and everything secret absent. The tools take the incident's detected time as an argument so every query is windowed.
+
+### Sealed definitions
+
+The agent, the purpose (and the grants of its role), the SQL tools, the pipelines (source, columns, model), the gateway model and the credential's host restriction decide what is read and where it goes. `aidb-setup` seals each under the vault data key (agentpg-kit `apgkit.aidb`: the same idea as the row MACs; PagerLens adds the six views and `pl_fence`, whose SQL and owner it also seals). The app compares them with the catalog when the vault opens and then at most every five minutes whenever `/readyz`, an investigation, a retrieval or `pagerlens aidb-status` asks (so a readiness probe is the schedule). A definition edited behind the app's back is reported as `modified`, a deleted one as `missing`, a planted agent, tool or purpose as `unsealed`; each is logged to `pagerlens.security`, counted in `pagerlens_tampered_rows_total{table="aidb_<kind>"}` and shown in `/readyz`. The agent is refused while anything fails verification, and the AIDB retrieval backend is dropped (back to `app`, loudly) while a pipeline or model fails it. Like the row MACs, this is enforced only while the vault is unlocked.
+
+### What is and is not verified (read this)
+
+Verified on **AIDB 7.9.0 in the Docker image `aidb-postgres:17`** (built in the ecosystem repository), with an unprivileged application role and an administrator, by tests marked `aidb`: setup and its idempotence, live pipelines (insert and delete), retrieval parity with the app backend on the demo data, MAC verification of hits, the purpose role's privileges, all seven SQL tools executing under it, the agent run end to end, denials landing in `aidb_otel.traces` and in the panel, tamper detection of each kind, fallbacks.
+
+Not verified, or limited:
+
+- **No real chat model was run.** The agent was driven by a scripted OpenAI-compatible server standing in for the gateway, so the plumbing (tools, purpose, citations, recording) is tested but how well a real model follows AIDB's simulated tool calling (AIDB prompts for a JSON tool call when the provider is `openai_completions`, which is what the gateway serves) is **not**. Expect to tune the instructions. AIDB also adds its own built-in `sleep` tool to every agent.
+- **Not tried on an AgentPG-hosted instance**: at the time of writing the platform's login role lacks the AIDB grants. `aidb-setup` needs an administrator who can create roles, own the database, register models and belong to `aidb_governance`; a superuser has all of it.
+- **Preview features** are not used: agent memory and the AIDB MCP endpoint stay off. The AIDB agent method itself is a preview of this app, labelled so in the UI.
+- Token usage is metered by AIDB and the gateway, not recorded in the run.
+- The default embedding model is downloaded from Hugging Face by the database server on first use. Its similarity scale differs from the app's, so incident similarities from the knowledge base are rescaled (`PAGERLENS_AIDB_SIM_FLOOR`, default 0.5: cosine 0.5 maps to 0, 1 to 1) to keep the app's thresholds meaningful; this was calibrated on a handful of demo incidents, not on real history.
+- Seals **detect, they do not prevent**: a superuser (or the owner of the `aidb` objects) can still change anything, the check runs only when it is run, and a copy of an older authentic definition can be replayed. Not sealed: the pipeline's distance operator (agentpg-kit's seal covers source, columns, steps and model), the grant that lets the runtime role use the gateway credential, the runtime role's memberships, `aidb.otel_client` and other server settings, row-level security, pipeline `Live` state, conversation history and the content of the source tables. The credential's secret cannot be sealed (AIDB never returns it).
+- A purpose confines SQL tools. It does not confine MCP-imported tools or `aidb.run_tool`, which is why the agent has neither.
+- Conversations are stored by AIDB in the database (`aidb.conversations`) and contain the fenced evidence the tools returned; the governance panel reads `aidb_otel.traces`, which holds the SQL text of every recorded call. Anyone who can read those tables can read that evidence.
+
+**Where this is going.** The Lab's simulator becomes AIDB's workload generator: sustained inserts into the source tables (pipeline lag and re-embedding under load), concurrent agent conversations, and retrieval latency as the incident history grows. That is not built yet.
+
 ## Single sign-on and roles (the ecosystem identity provider)
 
 PagerLens can run **standalone** (the first-run setup code and an admin password, as above) or **federated** with the ecosystem's
@@ -526,6 +590,9 @@ Notes:
 | `PAGERLENS_ALLOW_ANONYMOUS` | `false` | `true` disables authentication entirely. Honoured only on a loopback bind (`PAGERLENS_HOST` or `HOST`) or with `PAGERLENS_ALLOW_ANONYMOUS_PUBLIC=1`. Throwaway local demos only. |
 | `PAGERLENS_HOST`, `PAGERLENS_TRUSTED_HOPS`, `PAGERLENS_FORWARDED_ALLOW_IPS` | `HOST` / `0.0.0.0`, `1`, `127.0.0.1` | Bind address; number of your reverse proxies in front of the app (client address for rate limits); proxies uvicorn trusts for `X-Forwarded-*` (never `*`). |
 | `PAGERLENS_HOUSEKEEPING` | `true` | `false` stops this process's background auto-resolve thread. The runtime switch is the `auto_resolve_minutes` setting (0 = off). |
+| `PAGERLENS_RETRIEVAL_BACKEND` | `app` | `app` or `aidb`: where runbook search and incident recall come from ([AIDB mode](#aidb-mode-opt-in-preview)); `aidb` needs `pagerlens aidb-setup` and falls back to `app` loudly when it cannot work. |
+| `PAGERLENS_AIDB_ADMIN_DSN` | none | Read **only** by `pagerlens aidb-setup` (an administrator's connection string; omit it to be prompted). Never put it in the app's environment, compose or env files. |
+| `PAGERLENS_AIDB_SIM_FLOOR` | `0.5` | Cosine similarity that incident recall through AIDB treats as 0 (rescaling to the app's thresholds). |
 | `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_CHAT_MODEL`, `EMBEDDING_MODEL`, `EMBEDDING_DIM` | none | Optional environment provider: embeddings for retrieval, and the `env` chat account for the AI methods. The vector columns are created for `EMBEDDING_DIM` (default 768) on first start; if you change it later, the next start resizes them and re-embeds (see below). Without a provider a built-in offline hashing embedder is used: it matches words, not meaning. |
 
 **Changing `EMBEDDING_DIM` (or the model) on an existing database.** Stored vectors are derived data and cannot be converted between sizes. At startup, before anything else, PagerLens compares the size of `incident.embedding` and `runbook.embedding` with the configured one. If they differ it drops the two HNSW indexes, resizes the columns (`USING NULL`) and recreates the indexes in one transaction, then re-embeds every runbook (title + body) and incident (symptom, plus the stored error signatures once investigated or resolved) in batches. Notes:
@@ -610,6 +677,16 @@ This comes from PagerLens itself, unlike the platform 503 above: the app is runn
 make lint && make test            # unit tests, no database needed
 set -a; . ./.env; set +a; make test-db   # adds the database tests against a throwaway database
 ```
+
+AIDB mode has its own tests. `tests/test_aidb_switches.py` runs on plain Postgres (it is part of the normal run: the switches, fallbacks, evidence views, citation checks and the agent's answer handling, with AIDB's calls scripted). `tests/test_aidb_integration.py` (marker `aidb`) needs a server with the extension and skips without `AIDB_TEST_URL`, which is what CI does (no AIDB image, no EDB token):
+
+```bash
+# image: see docker/aidb-postgres in the ecosystem repository (needs an EDB repository token as a BuildKit secret)
+docker run -d --name aidb-test -p 127.0.0.1:55499:5432 -e POSTGRES_PASSWORD=... aidb-postgres:17 -c aidb.allow_insecure_egress=on
+AIDB_TEST_URL=postgresql://postgres:...@127.0.0.1:55499/postgres AIDB_TEST_CALLBACK_HOST=192.168.65.254 .venv/bin/pytest -q -m aidb
+```
+
+`AIDB_TEST_CALLBACK_HOST` (an address of your machine the container can reach; Docker Desktop: `192.168.65.254`) enables the tests that run the agent against a scripted chat server. Each run creates its own database and roles and removes them.
 
 ## Security
 

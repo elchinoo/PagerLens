@@ -12,7 +12,7 @@ def main(argv: list[str] | None = None) -> int:
     inv = sub.add_parser("investigate", help="investigate an incident from the terminal")
     inv.add_argument("incident_id", type=int)
     inv.add_argument("--no-memory", action="store_true")
-    inv.add_argument("--mode", choices=["rules", "llm", "hybrid"], default="rules")
+    inv.add_argument("--mode", choices=["rules", "llm", "hybrid", "aidb", "aidb_hybrid"], default="rules")
     inv.add_argument("--account", default=None, help="chat account id, or 'env' (LLM_BASE_URL, LLM_API_KEY, LLM_CHAT_MODEL)")
     ev = sub.add_parser("eval", help="before/after learning evaluation on the simulator (resets demo telemetry)")
     ev.add_argument("--mode", choices=["rules", "llm", "hybrid"], default="rules")
@@ -25,6 +25,10 @@ def main(argv: list[str] | None = None) -> int:
     rk.add_argument("--confirm", action="store_true", help="required: restart every other replica afterwards")
     sub.add_parser("adopt-rowmacs", help="sign existing provider accounts, runbooks, the embedding choice, sessions and API tokens that have no "
                                          "row MAC (trusts the database as it is now; asks for the admin password)")
+    sub.add_parser("aidb-setup", help="OPERATOR: set up AIDB mode (pipelines, evidence-view purpose, SQL tools, agent, seals); idempotent. Needs an admin "
+                                      "connection string (PAGERLENS_AIDB_ADMIN_DSN or a hidden prompt, never stored) and the admin password")
+    ast = sub.add_parser("aidb-status", help="report AIDB mode: pipelines, knowledge bases, agent, purpose, denials and whether the sealed definitions still verify")
+    ast.add_argument("--json", action="store_true", help="print the full report as JSON")
     sub.add_parser("reset-admin", help="forget the admin password and delete stored provider keys (recovery)")
     sub.add_parser("start", help="container entrypoint: migrate, optionally seed (AUTO_SEED=true), serve")
     args = p.parse_args(argv)
@@ -87,6 +91,10 @@ def main(argv: list[str] | None = None) -> int:
         return _rotate_key(args.confirm)
     elif args.cmd == "adopt-rowmacs":
         return _adopt_rowmacs()
+    elif args.cmd == "aidb-setup":
+        return _aidb_setup()
+    elif args.cmd == "aidb-status":
+        return _aidb_status(args.json)
     elif args.cmd == "reset-admin":
         from . import auth
         from .db import connect
@@ -218,6 +226,113 @@ def _adopt_rowmacs() -> int:
     print("signed rows without a MAC: " + ", ".join(f"{t} {n}" for t, n in counts.items()) +
           ". This trusted the database as it was now; rows written by anything else from here on are ignored.")
     return 0
+
+
+def _open_vault(conn, *, optional: bool = False) -> bool:
+    """Unlock the vault for a command that must read or write seals: the platform secret, else the admin password (a prompt, or
+    PAGERLENS_ADMIN_PASSWORD for automation; never an argument). With `optional` an empty answer means 'skip'."""
+    import getpass
+    import os
+
+    from . import core
+
+    if not core.vault.is_initialized(conn):
+        print("there is no vault yet: nothing can be sealed or verified (create the admin password in the web app first)", file=sys.stderr)
+        return False
+    if core.vault.is_unlocked():
+        return True
+    if core.vault.try_unlock_with_platform_secret(conn):
+        conn.commit()
+        return True
+    if core.vault.has_password_wrap(conn):
+        password = os.environ.get("PAGERLENS_ADMIN_PASSWORD") or getpass.getpass(
+            "admin password" + (" (Enter to skip verification)" if optional else "") + ": ")
+        if optional and not password:
+            return False
+        if core.vault.unlock_with_password(conn, password):
+            conn.commit()
+            return True
+        print("wrong admin password", file=sys.stderr)
+        return False
+    print("the vault is locked and no platform secret is set", file=sys.stderr)
+    return False
+
+
+def _aidb_setup() -> int:
+    """OPERATOR command. The administrator's connection string comes from PAGERLENS_AIDB_ADMIN_DSN or a hidden prompt; it is used for this
+    command only: never stored, logged, written to a file or put in the app's environment. Idempotent: a second run reports `unchanged`."""
+    import getpass
+    import os
+
+    import psycopg
+    from psycopg.rows import dict_row
+
+    from . import aidb_mode, aidb_setup, core
+    from .db import connect
+    from .migrate import run as migrate_run
+
+    migrate_run()          # the evidence views are created by the app's migrations (as the table owner)
+    with connect() as conn:
+        role = conn.execute("SELECT current_user AS u").fetchone()["u"]
+        if not _open_vault(conn):
+            return 1
+    dsn = os.environ.get("PAGERLENS_AIDB_ADMIN_DSN") or getpass.getpass("administrator connection string for this database (not stored): ")
+    if not dsn.strip():
+        print("no administrator connection string given", file=sys.stderr)
+        return 1
+    try:
+        admin = psycopg.connect(dsn.strip(), row_factory=dict_row)
+    except psycopg.Error as exc:
+        print(f"could not connect with the administrator connection string: {type(exc).__name__}", file=sys.stderr)
+        return 1
+    finally:
+        del dsn
+    try:
+        rep = aidb_setup.setup(admin, vault=core.vault, runtime_role=role, gateway=aidb_setup.Gateway.from_env())
+    except (aidb_setup.aidb.AidbError, psycopg.Error) as exc:
+        admin.rollback()
+        print(f"aidb-setup failed: {type(exc).__name__}: {str(exc).strip().splitlines()[0][:300] if str(exc).strip() else ''}", file=sys.stderr)
+        return 1
+    finally:
+        admin.close()
+    aidb_mode.reset()
+    for what, action in rep.steps:
+        print(f"  {what}: {action}")
+    for p in rep.problems:
+        print(f"  PROBLEM: {p}", file=sys.stderr)
+    print("changed something" if rep.changed else "nothing changed (already set up)")
+    return 1 if rep.problems else 0
+
+
+def _aidb_status(as_json: bool) -> int:
+    import json
+
+    from . import aidb_mode
+    from .db import connect
+
+    with connect() as conn:
+        verified = _open_vault(conn, optional=True)
+        rep = aidb_mode.status(conn)
+    rep["verification"]["note"] = "" if verified else "verification skipped: the vault is locked"
+    problems = list(rep.get("problems", [])) + [f"{d['kind']} {d['name']}: {d['problem']} (changed outside the app)" for d in rep["verification"]["drift"]]
+    if as_json:
+        print(json.dumps(rep, indent=2, default=str))
+        return 1 if problems else 0
+    a = rep["aidb"]
+    print(f"AIDB: {'available, version ' + a['version'] if a['available'] else 'not available (' + a['reason'] + ')'}")
+    print(f"retrieval backend requested: {rep['requested_backend']}" + (f"; in effect: {rep['retrieval']}" if "retrieval" in rep else ""))
+    if a["available"]:
+        for p in rep["pipelines"] if isinstance(rep.get("pipelines"), list) else []:
+            print(f"  pipeline {p['name']}: {p['mode']}, {p['embedded_rows']}/{p['source_rows']} rows embedded, lag {p['lag']}, errors {p['record_errors']}")
+        for ag in rep["agents"] if isinstance(rep.get("agents"), list) else []:
+            print(f"  agent {ag['name']}: model {ag['model']}, purpose {ag['purpose']}, tools {len(ag['tools'] or [])}")
+        dn = rep.get("denials", {})
+        print(f"  purpose denials (24 h): {dn.get('count', dn.get('unavailable', '?'))}")
+    v = rep["verification"]
+    print("  seals: " + ("all definitions verify" if v["checked"] and not v["drift"] else v["note"] or v["reason"] if not v["checked"] else "DRIFT"))
+    for p in problems:
+        print(f"  PROBLEM: {p}")
+    return 1 if problems else 0
 
 
 def _reembed() -> int:

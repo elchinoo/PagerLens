@@ -9,6 +9,7 @@ Retrieval never fails because of embeddings: when the provider is down, or its v
 reconciliation is pending), runbook search falls back to full-text only and incident recall returns nothing.
 """
 import logging
+import os
 
 from pgvector import Vector
 
@@ -17,6 +18,11 @@ from .embeddings import embed
 
 RRF_K = 60
 log = logging.getLogger("pagerlens.embeddings")
+
+
+def _aidb_backend() -> bool:
+    """PAGERLENS_RETRIEVAL_BACKEND=aidb (see aidb_mode). Cheap and import-free, so the default `app` path is exactly what it always was."""
+    return os.environ.get("PAGERLENS_RETRIEVAL_BACKEND", "").strip().lower() == "aidb"
 
 
 def embed_one(text: str, conn=None) -> Vector:
@@ -49,6 +55,12 @@ def query_vector(conn, text: str, table: str) -> Vector | None:
 
 def search_runbooks(conn, query: str, *, category: str | None = None, service: str | None = None,
                     limit: int = 3) -> list[dict]:
+    if _aidb_backend():
+        from . import aidb_mode
+
+        found = aidb_mode.search_runbooks(conn, query, category=category, service=service, limit=limit)
+        if found is not None:          # None: AIDB is not usable right now (logged); the app backend below answers
+            return found
     vec = query_vector(conn, query, "runbook")
     vec_cte = ("""SELECT id, row_number() OVER (ORDER BY embedding <=> %(vec)s) AS r FROM runbook
             WHERE (%(cat)s::text IS NULL OR category = %(cat)s) AND embedding IS NOT NULL
@@ -84,6 +96,12 @@ def search_runbooks(conn, query: str, *, category: str | None = None, service: s
 def similar_incidents(conn, text: str, *, exclude_id: int | None = None, limit: int = 5,
                       min_similarity: float = 0.2) -> list[dict]:
     """Resolved incidents whose symptom/signatures look like `text` (the learning loop's memory)."""
+    if _aidb_backend():
+        from . import aidb_mode
+
+        found = aidb_mode.similar_incidents(conn, text, exclude_id=exclude_id, limit=limit, min_similarity=min_similarity)
+        if found is not None:
+            return found
     vec = query_vector(conn, text, "incident")
     if vec is None:
         return []
@@ -107,6 +125,8 @@ def remember_incident(conn, incident_id: int, signatures: list[str]) -> None:
                        "LEFT JOIN service s ON s.id=i.service_id WHERE i.id=%s",
                        (incident_id,)).fetchone()
     if row:
+        # the text AIDB's pipeline embeds for incident recall (a no-op for an incident that is not resolved); harmless without AIDB
+        conn.execute("UPDATE incident_memory SET signatures=%s WHERE incident_id=%s", (" | ".join(signatures[:6])[:2000], incident_id))
         text = f"{row['name']}: {row['symptom']} | " + " | ".join(signatures[:6])
         vec = query_vector(conn, text, "incident")
         if vec is not None:  # otherwise keep whatever is stored: the reconciler fills it in later

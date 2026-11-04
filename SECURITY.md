@@ -41,6 +41,17 @@ affected version or commit.
   backup, rows can be deleted, unsigned columns (names, timestamps, embeddings, telemetry, other settings, tuning proposals) are not
   covered, and an attacker who holds the data key can sign. Rows written before this feature are ignored until `pagerlens adopt-rowmacs`
   signs them, which trusts the database as it is at that moment.
+- **AIDB mode** (opt-in, preview; README, "AIDB mode"). The agent's tools run as a purpose role that can SELECT six masked, fenced evidence
+  views and nothing else, so what the investigator may touch is a Postgres grant boundary, and a refused call is recorded in
+  `aidb_otel.traces`. The agent, purpose (with its role's grants), SQL tools, pipelines, model and the views carry seals under the vault
+  data key (agentpg-kit `apgkit.aidb`); a change made outside the app is reported in `/readyz`, the log and a counter, and the agent is
+  refused until an operator re-seals. Retrieval hits are only keys: runbook rows are read back and their row MACs verified, and every
+  citation is checked against the views for the incident's window. The setup command that needs more than the runtime role (roles,
+  models, pipelines, purposes, telemetry) takes an administrator's connection string for that one command and never stores it. Limits:
+  seals detect, they do not prevent (a database superuser or the owner of the `aidb` objects can change anything, and a copy of an older
+  authentic definition can replay); the runtime role's gateway-credential grant and memberships, server settings and the source tables'
+  content are not sealed; conversations and telemetry hold the evidence text and the attempted SQL; no real chat model was exercised and no
+  AgentPG-hosted instance was tried.
 - An optional static `PAGERLENS_API_KEY` remains for automation. It is a full-access credential held in the
   environment or a file: treat it like a password, or leave it unset and use tokens.
 - Failed sign-ins and bad credentials are rate limited (10 per minute per client address, in memory, per

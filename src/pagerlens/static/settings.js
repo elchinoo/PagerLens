@@ -1,9 +1,10 @@
 import { api } from "/kit/api.js";
+import { renderAidb } from "/static/aidb.js";
 import { flush } from "/static/regions.js";
 import { $, confirmDialog, copy, field, fill, fmtDate, h, toast } from "/kit/ui.js";
 
 export async function initSettings() {
-  await Promise.all([renderAccounts(), renderSecurity(), renderHousekeeping()]);
+  await Promise.all([renderAccounts(), renderSecurity(), renderHousekeeping(), renderAidb($("settings-aidb"))]);
 }
 
 // ---- stale and auto-resolve ---------------------------------------------------------------------

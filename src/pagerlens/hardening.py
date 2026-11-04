@@ -59,6 +59,9 @@ MASKED: dict[str, tuple[str, dict[str, str]]] = {
         "id": "pass", "service_id": "pass", "ts": "pass", "level": "pass", "signature": "pass",
         "message": scrub_expr("message"), "fields": scrub_expr("fields", jsonb=True)}),
     # tuning proposals name people who decided and statements that show the workload: names become an initial, text is scrubbed
+    # the text AIDB mode embeds for incident recall: symptom and error signatures of resolved incidents
+    "incident_memory": ("incident_memory_masked", {
+        "incident_id": "pass", "base": scrub_expr("base"), "signatures": scrub_expr("signatures"), "kb_text": scrub_expr("kb_text")}),
     "tuning_proposal": ("tuning_proposal_masked", {
         "id": "pass", "source": "pass", "target": "pass", "applicable": "pass", "status": "pass", "motivating_queryid": "pass",
         "decided_at": "pass", "applied_at": "pass", "created_at": "pass", "before_timing": "pass", "after_timing": "pass",
