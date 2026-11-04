@@ -1,5 +1,5 @@
-agentpg-kit @ https://github.com/elchinoo/agentpg-kit/archive/cb6e1ca608c09eb6f14f805196382d4992e369bc.tar.gz \
-    --hash=sha256:b4fa713a3abb53d06ae2eed717bf299320a9ad042c42d3cddd697855611c9733
+agentpg-kit @ https://github.com/elchinoo/agentpg-kit/archive/e7dd12403f85738bffea64e18efd5401d0c31b56.tar.gz \
+    --hash=sha256:43366921afe0c9dc8dbf1ba0c13e5b8a5b3180a8e68dd755dd02f9176b4793ae
     # via
     #   --override requirements/kit-override.txt
     #   pagerlens (pyproject.toml)

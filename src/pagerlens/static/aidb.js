@@ -3,7 +3,7 @@
 import { api } from "/kit/api.js";
 import { fill, fmtDateTime, h } from "/kit/ui.js";
 
-const STATES = { ready: "ok", unverified: "warn", "not-set-up": "plain", tampered: "bad", error: "bad", unavailable: "plain" };
+const STATES = { ready: "ok", unverified: "warn", "not-set-up": "plain", tampered: "bad", unsealed: "bad", error: "bad", unavailable: "plain" };
 
 export async function renderAidb(box) {
   if (!box) return;
@@ -25,8 +25,8 @@ export async function renderAidb(box) {
       gov && gov.denials_error ? h("p", { class: "hint" }, `Denials are not readable here: ${gov.denials_error}.`) : null,
       rows.length ? h("table", {},
         h("caption", { class: "sr-only" }, "Tool calls refused by the agent's purpose"),
-        h("thead", {}, h("tr", {}, ["When", "Agent", "Role", "Reason", "Statement"].map((c) => h("th", { scope: "col" }, c)))),
+        h("thead", {}, h("tr", {}, ["When", "Agent", "Role", "Reason", "Decision"].map((c) => h("th", { scope: "col" }, c)))),
         h("tbody", {}, rows.map((d) => h("tr", {}, h("td", {}, fmtDateTime(d.at)), h("td", {}, d.agent || ""), h("td", {}, d.role || ""),
-          h("td", {}, d.reason || ""), h("td", { class: "wrap-cell" }, d.statement || ""))))) :
+          h("td", {}, d.reason || ""), h("td", { class: "wrap-cell" }, d.decision_id || ""))))) :
         (gov && gov.state === "ready" && !gov.denials_error ? h("p", { class: "muted" }, "No tool call was denied in this window.") : null)));
 }

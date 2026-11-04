@@ -28,6 +28,34 @@ PIPELINES = {          # name -> (source table, key column, text column, what it
     "pl_incident": ("incident_memory", "incident_id", "kb_text", "resolved incidents (symptom and error signatures)"),
 }
 SEAL_KINDS_EXTRA = ("pl_view", "pl_function")
+GOVERNANCE_VIEW = "pl_governance_decisions_v"
+CREDENTIAL = "llm_gateway"           # the kit's default credential name for a gateway model
+
+
+def governance_view_sql() -> str:
+    """The narrow view the runtime role reads instead of `aidb_otel.traces`. A trace row holds the attempted SQL text of every recorded
+    AIDB call (and the principal, session and trace ids), none of which the governance panel needs. The view runs with the privileges of
+    its owner (the administrator who runs `aidb-setup`), is a security barrier (the role cannot use leaky predicates to see rows the
+    filter hides) and exposes only: when, status, decision id, agent, the purpose's role, where the decision was taken, the denial
+    reason and its class. Rows: this app's agent, or any agent running under this app's purpose role. No SQL text."""
+    role = aidb.purpose_role_name(PURPOSE)
+    return f"""
+CREATE OR REPLACE VIEW {GOVERNANCE_VIEW} WITH (security_barrier = true) AS
+SELECT d.id, d.recorded_at, d.decision_id, d.decision_status, d.agent_name, d.agent_role, d.interaction_point, d.denial_reason, d.denial_class
+FROM (
+  SELECT t.id, t.recorded_at, t.decision_id, t.decision_status, t.agent_name,
+         a.attrs->>'aidb.agent.decision.agent_role' AS agent_role,
+         a.attrs->>'aidb.agent.decision.interaction_point' AS interaction_point,
+         a.attrs->>'aidb.agent.decision.denial_reason' AS denial_reason,
+         a.attrs->>'aidb.agent.decision.denial_class' AS denial_class
+  FROM aidb_otel.traces t
+  CROSS JOIN LATERAL (
+    SELECT COALESCE(jsonb_object_agg(x->>'key', COALESCE(x#>>'{{value,stringValue}}', x#>>'{{value,intValue}}')), '{{}}'::jsonb) AS attrs
+    FROM jsonb_path_query(t.payload_json, '$.resourceSpans[*].scopeSpans[*].spans[*].attributes[*]') AS x) a
+  WHERE t.source = 'internal' AND t.decision_status IS NOT NULL
+) d
+WHERE d.agent_name = '{AGENT}' OR d.agent_role = '{role}'
+"""
 
 # ---- the agent's tools: custom SQL over the evidence views, nothing else ---------------------------------------------------------
 _W = "${anchor}::timestamptz"
@@ -128,15 +156,37 @@ class Report:
         return any(not a.startswith(("unchanged", "skipped")) for _, a in self.steps)
 
 
+def expected_seals() -> list[tuple[str, str]]:
+    """The (kind, name) objects `setup` creates and seals: one that exists without a seal is reported `unsealed` whatever its kind."""
+    return [("agent", AGENT), ("purpose", PURPOSE), ("model", CHAT_MODEL), ("credential", CREDENTIAL),
+            *(("sql_tool", t) for t in TOOLS), *(("pipeline", p) for p in PIPELINES)]
+
+
 def _purpose_action(res: dict) -> str:
     return "unchanged" if not res["changed"] else f"updated ({len(res['changed'])} change(s): " + "; ".join(res["changed"][:3]) + (" ..." if len(res["changed"]) > 3 else "") + ")"
+
+
+def _ensure_governance_view(conn, runtime_role: str) -> str:
+    """Create or refresh the narrow governance view and grant it (and only it) to the runtime role."""
+    before = aidb_views.current_definition(conn, GOVERNANCE_VIEW)
+    conn.execute(governance_view_sql())
+    after = aidb_views.current_definition(conn, GOVERNANCE_VIEW)
+    q, v = sql.Identifier(runtime_role), sql.Identifier(GOVERNANCE_VIEW)
+    granted = not conn.execute("SELECT has_table_privilege(%s, %s, 'SELECT') AS ok", (runtime_role, GOVERNANCE_VIEW)).fetchone()["ok"]
+    if granted:
+        conn.execute(sql.SQL("GRANT SELECT ON {} TO {}").format(v, q))
+    return ("created" if before is None else "updated" if before != after else "unchanged") + (", SELECT granted" if granted else "")
 
 
 def seal_extras(conn, vault) -> dict[str, str]:
     """Seal the evidence views and `pl_fence` (the kit's seal covers the AIDB catalog, not these). Returns name -> sealed/changed/unchanged."""
     out: dict[str, str] = {}
-    conn.execute(aidb.SEAL_SQL)
+    if not aidb.seal_table_exists(conn):          # (the migrations create it; an existing table is never touched)
+        conn.execute(aidb.SEAL_SQL)
     items = [(v, aidb_views.current_definition(conn, v)) for v in aidb_views.VIEW_NAMES] + [("pl_fence", aidb_views.function_definition(conn, "pl_fence"))]
+    gov = aidb_views.current_definition(conn, GOVERNANCE_VIEW)
+    if gov is not None:                      # absent on a setup without telemetry
+        items.append((GOVERNANCE_VIEW, gov))
     for name, fields in items:
         if fields is None:
             raise aidb.AidbError(f"{name} does not exist: run `pagerlens migrate` (or start the app) before aidb-setup")
@@ -190,12 +240,28 @@ def setup(conn, *, vault, runtime_role: str, gateway: Gateway | None = None, emb
             except Exception as exc:  # noqa: BLE001
                 conn.rollback()
                 rep.problems.append(f"telemetry not enabled ({str(exc).splitlines()[0][:120]}): purpose decisions will not be recorded")
-        can = conn.execute("SELECT has_schema_privilege(%s, 'aidb_otel', 'USAGE') AND has_table_privilege(%s, 'aidb_otel.traces', 'SELECT') AS ok",
-                           (runtime_role, runtime_role)).fetchone()["ok"]
-        if not can:
-            for stmt in ("GRANT USAGE ON SCHEMA aidb_otel TO {}", "GRANT SELECT ON aidb_otel.traces TO {}"):
-                conn.execute(sql.SQL(stmt).format(q))
-        rep.add(f"role {runtime_role}: read aidb_otel.traces (governance panel)", "unchanged" if can else "granted")
+    # The runtime role gets no access to aidb_otel.traces (it holds the attempted SQL of every recorded call): the governance panel reads
+    # the narrow view below. A grant made by an earlier version of this command is revoked here.
+    has_otel = conn.execute("SELECT to_regclass('aidb_otel.traces') IS NOT NULL AS ok").fetchone()["ok"]
+    if has_otel:
+        revoked = []
+        for what, acl, stmt in (("SELECT on aidb_otel.traces", "SELECT c.relacl FROM pg_class c WHERE c.oid = 'aidb_otel.traces'::regclass",
+                                 "REVOKE SELECT ON aidb_otel.traces FROM {}"),
+                                ("USAGE on schema aidb_otel", "SELECT n.nspacl FROM pg_namespace n WHERE n.nspname = 'aidb_otel'",
+                                 "REVOKE USAGE ON SCHEMA aidb_otel FROM {}")):
+            priv = what.split()[0]
+            if conn.execute(f"SELECT EXISTS (SELECT 1 FROM aclexplode(({acl})) a JOIN pg_roles r ON r.oid = a.grantee "                     # noqa: S608
+                            "WHERE r.rolname = %s AND a.privilege_type = %s) AS ok", (runtime_role, priv)).fetchone()["ok"]:
+                conn.execute(sql.SQL(stmt).format(q))              # (only a grant made to this role by name: USAGE that PUBLIC carries stays, it opens no table)
+                revoked.append(what)
+        rep.add(f"role {runtime_role}: no direct access to aidb_otel.traces", f"revoked ({', '.join(revoked)})" if revoked else "unchanged")
+        if conn.execute("SELECT has_table_privilege(%s, 'aidb_otel.traces', 'SELECT') AS ok", (runtime_role,)).fetchone()["ok"]:
+            rep.problems.append(f"role {runtime_role} can still read aidb_otel.traces (through PUBLIC or a role membership): revoke that too")
+    conn.commit()
+    if telemetry and has_otel:
+        rep.add(f"view {GOVERNANCE_VIEW} (governance panel)", _ensure_governance_view(conn, runtime_role))
+    elif telemetry:
+        rep.problems.append("aidb_otel.traces does not exist: the governance panel has no source")
     conn.commit()
     # 2. evidence views must exist (the app creates them at start-up as the table owner)
     for v in aidb_views.VIEW_NAMES:
@@ -239,6 +305,13 @@ def setup(conn, *, vault, runtime_role: str, gateway: Gateway | None = None, emb
     # 5. seal what the kit does not cover, then check everything once
     for name, action in seal_extras(conn, vault).items():
         rep.add(f"seal {name}", action)
-    drift = aidb.verify(conn, vault)
+    # the runtime role only ever READS the seal table (verification issues no DDL): the operator creates it and grants it
+    if not conn.execute("SELECT has_table_privilege(%s, %s, 'SELECT') AS ok", (runtime_role, aidb.SEAL_TABLE)).fetchone()["ok"]:
+        conn.execute(sql.SQL("GRANT SELECT ON {} TO {}").format(sql.Identifier(aidb.SEAL_TABLE), q))
+        rep.add(f"role {runtime_role}: read {aidb.SEAL_TABLE}", "granted")
+    else:
+        rep.add(f"role {runtime_role}: read {aidb.SEAL_TABLE}", "unchanged")
+    conn.commit()
+    drift = aidb.verify(conn, vault, expect=expected_seals())
     rep.problems += [f"{d.kind} {d.name}: {d.problem}" for d in drift]
     return rep

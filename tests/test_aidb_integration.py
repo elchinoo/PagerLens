@@ -175,7 +175,7 @@ def test_setup_created_everything_and_a_second_run_changes_nothing(stack, unlock
     assert any(n.startswith("pipeline pl_runbook") for n in names) and any(n.startswith("tool pl_incident") for n in names)
     with psycopg.connect(stack["admin_dsn"], row_factory=dict_row) as a:
         again = aidb_setup.setup(a, vault=core.vault, runtime_role=stack["role"], gateway=stack["gateway"], agent_model=None if stack["gateway"] else "dummy")
-    assert not again.changed and again.problems == [], again.steps
+    assert not again.changed and again.problems == [], [x for x in again.steps if not x[1].startswith("unchanged")]
     assert [x for x in again.steps if x[1] != "unchanged" and not x[1].startswith("unchanged")] == []
     res = _clean(rt)
     assert res["checked"]
@@ -188,8 +188,9 @@ def test_the_runtime_role_stays_unprivileged(stack, adm):
     assert not any(r.values())
     member = lambda role: adm.execute("SELECT pg_has_role(%s, %s, 'MEMBER') AS m", (stack["role"], role)).fetchone()["m"]  # noqa: E731
     assert member("aidb_users") and member(PURPOSE_ROLE) and not member("aidb_governance") and not member("aidb_admins")
-    assert adm.execute("SELECT has_table_privilege(%s, 'aidb_otel.traces', 'SELECT') AS ok", (stack["role"],)).fetchone()["ok"]
-    assert not adm.execute("SELECT has_table_privilege(%s, 'aidb_otel.traces', 'DELETE') AS ok", (stack["role"],)).fetchone()["ok"]
+    has = lambda what: adm.execute(f"SELECT {what} AS ok", (stack["role"],)).fetchone()["ok"]  # noqa: E731, S608
+    assert not has("has_table_privilege(%s, 'aidb_otel.traces', 'SELECT')")      # (schema USAGE comes from PUBLIC and opens no table)
+    assert has(f"has_table_privilege(%s, '{aidb_setup.GOVERNANCE_VIEW}', 'SELECT')") and not has(f"has_table_privilege(%s, '{aidb_setup.GOVERNANCE_VIEW}', 'INSERT')")
 
 
 def test_the_purpose_role_reads_the_evidence_views_and_nothing_else(stack, adm):
@@ -306,8 +307,8 @@ def test_the_agent_runs_every_tool_as_the_purpose_role_and_the_app_verifies_its_
     cited = {r["payload"]["evidence_id"] for r in rt.execute("SELECT payload FROM observation WHERE run_id=%s AND source='aidb_evidence'", (run_id,))}
     assert cited == {deploy, metric}
     # the decisions AIDB recorded for this conversation are all 'allowed': the tools only touched the views
-    allowed = _wait(lambda: [d for d in aidb.decisions(rt, status="allowed", limit=100) if d["agent"] == aidb_setup.AGENT and d["role"] == PURPOSE_ROLE])
-    assert allowed and not [d for d in aidb.decisions(rt, limit=100) if d["agent"] == aidb_setup.AGENT]
+    allowed = _wait(lambda: [d for d in aidb.decisions(adm, status="allowed", limit=100) if d["agent"] == aidb_setup.AGENT and d["role"] == PURPOSE_ROLE])
+    assert allowed and not [d for d in aidb.decisions(adm, limit=100) if d["agent"] == aidb_setup.AGENT]
     _clean(rt)
 
 
@@ -339,14 +340,14 @@ def test_a_tool_that_reads_a_table_outside_the_purpose_is_denied_and_shows_in_th
     aidb.ensure_agent(adm, "pl_test_agent", instructions="Use the tools.", model=aidb_setup.CHAT_MODEL, purpose=aidb_setup.PURPOSE,
                       tools=["pl_test_forbidden"])
     try:
-        before = len(aidb.decisions(rt, limit=500))
+        before = len(aidb.decisions(adm, limit=500))
         need_fake.script = [json.dumps({"tool_calls": [{"name": "pl_test_forbidden", "arguments": {}}]}), "I was not allowed to read that."]
         reply = aidb.converse(rt, "pl_test_agent", "Show me the token hashes.")
         assert reply.ok and "api_token" not in (reply.message or "")
         assert any("permission denied" in str(body) for _, _, body in need_fake.log), "the model should have been shown a permission error"
-        found = _wait(lambda: [d for d in aidb.decisions(rt, limit=500) if "api_token" in (d["sql"] or "")])
+        found = _wait(lambda: [d for d in aidb.decisions(adm, limit=500) if "api_token" in (d["sql"] or "")])
         assert found and found[0]["reason"] == "engine_privilege_denied" and found[0]["role"] == PURPOSE_ROLE and found[0]["agent"] == "pl_test_agent"
-        assert len(aidb.decisions(rt, limit=500)) == before + 1
+        assert len(aidb.decisions(adm, limit=500)) == before + 1
         # the panel (and the endpoint behind it)
         h = {"Authorization": f"Bearer {STATIC_KEY}"}
         gov = client.get("/api/aidb/governance", headers=h)
@@ -354,8 +355,10 @@ def test_a_tool_that_reads_a_table_outside_the_purpose_is_denied_and_shows_in_th
         body = gov.json()
         assert body["state"] == "ready" and body["role"] == PURPOSE_ROLE and body["telemetry"]["otel_client"] == "database"
         assert any("SELECT on public.pl_ev_deploys" in g for g in body["grants"]) and not any("api_token" in g for g in body["grants"])
-        denial = next(d for d in body["denials"] if "api_token" in d["statement"])
+        assert body["source"] == aidb_setup.GOVERNANCE_VIEW
+        denial = next(d for d in body["denials"] if d["decision_id"] == found[0]["decision_id"])
         assert denial["reason"] == "engine_privilege_denied" and denial["agent"] == "pl_test_agent" and denial["role"] == PURPOSE_ROLE and denial["decision_id"]
+        assert "api_token" not in json.dumps(body["denials"]) and not {"statement", "sql", "principal"} & set(denial)      # the attempted SQL never reaches the role
         assert body["verification"]["checked"] is True
     finally:
         adm.rollback()

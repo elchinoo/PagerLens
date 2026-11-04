@@ -1111,7 +1111,8 @@ def aidb_status():
 @app.get("/api/aidb/governance", dependencies=[Depends(require("settings:manage"))])
 def aidb_governance(window: str = Query("24 hours", pattern=r"^\d{1,3} (minutes|hours|days)$")):
     """The governance panel's data: what the agent's purpose may read, verification of the seals, and the tool calls AIDB's purpose
-    denied (`aidb.decisions`, read from aidb_otel.traces). Needs telemetry on and SELECT on aidb_otel.traces (aidb-setup grants both)."""
+    denied. The decisions come from the narrow view `pl_governance_decisions_v` that `aidb-setup` creates (status, time, agent, reason, decision id;
+    no SQL text, only this app's agents); the runtime role has no access to aidb_otel.traces itself."""
     with _translate(), connect() as conn:
         return aidb_mode.governance(conn, window=window)
 

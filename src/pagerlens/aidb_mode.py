@@ -86,6 +86,13 @@ RETRIEVAL_KINDS = ("pipeline", "model", "credential")
 def _extra_drift(conn) -> list[aidb.Drift]:
     """The evidence views and pl_fence, which the kit's seal does not cover: modified or missing since the operator sealed them."""
     out: list[aidb.Drift] = []
+    if not aidb.seal_table_exists(conn):          # nothing was ever sealed: the views that exist are unsealed (no DDL, no error)
+        for name in (*aidb_views.VIEW_NAMES, aidb_setup.GOVERNANCE_VIEW):
+            if aidb_views.current_definition(conn, name) is not None:
+                out.append(aidb.Drift("pl_view", name, "unsealed"))
+        if aidb_views.function_definition(conn, "pl_fence") is not None:
+            out.append(aidb.Drift("pl_function", "pl_fence", "unsealed"))
+        return out
     for r in conn.execute("SELECT kind, name, mac FROM apgkit_aidb_seal WHERE kind = ANY(%s) ORDER BY kind, name",
                           (list(aidb_setup.SEAL_KINDS_EXTRA),)).fetchall():
         fields = (aidb_views.current_definition(conn, r["name"]) if r["kind"] == "pl_view"
@@ -103,7 +110,7 @@ def verify_now(conn) -> dict:
         res = {"at": time.monotonic(), "checked": False, "drift": [], "reason": "the vault is locked, so seals cannot be verified"}
     else:
         try:
-            drift = [*aidb.verify(conn, core.vault), *_extra_drift(conn)]
+            drift = [*aidb.verify(conn, core.vault, expect=aidb_setup.expected_seals()), *_extra_drift(conn)]
             conn.commit()
             res = {"at": time.monotonic(), "checked": True, "drift": [{"kind": d.kind, "name": d.name, "problem": d.problem} for d in drift],
                    "reason": ""}
@@ -330,12 +337,18 @@ def _brief(ctx, evidence_index: list[dict] | None) -> str:
     return text
 
 
+def _governance_view_exists(conn) -> bool:
+    return bool(conn.execute("SELECT to_regclass(%s) IS NOT NULL AS ok", (f"public.{aidb_setup.GOVERNANCE_VIEW}",)).fetchone()["ok"])
+
+
 def _denials_since(conn, started: datetime) -> int | None:
     try:
         with conn.transaction():
-            return sum(1 for d in aidb.decisions(conn, since="10 minutes", limit=200)
-                       if d["agent"] == aidb_setup.AGENT and d["recorded_at"] >= started)
-    except Exception:  # noqa: BLE001 - telemetry not readable by this role: unknown, not zero
+            if not _governance_view_exists(conn):
+                return None
+            return conn.execute(f"SELECT count(*) AS n FROM {aidb_setup.GOVERNANCE_VIEW} WHERE decision_status = 'denied' "      # noqa: S608
+                                "AND agent_name = %s AND recorded_at >= %s", (aidb_setup.AGENT, started)).fetchone()["n"]
+    except Exception:  # noqa: BLE001 - not readable by this role: unknown, not zero
         return None
 
 
@@ -431,7 +444,11 @@ def health(conn) -> dict:
             return out
         v = verify_cached(conn)
         out["verified"] = v["checked"]
-        if v["drift"]:
+        if not aidb.seal_table_exists(conn):
+            conn.commit()
+            out["state"] = "unsealed"          # AIDB objects without any seal: refused, but the app stays ready
+            out["verify_note"] = "the seal table does not exist: an operator runs `pagerlens aidb-setup`"
+        elif v["drift"]:
             out["state"] = "tampered"
             out["tampered"] = [f"{d['kind']} {d['name']}: {d['problem']}" for d in v["drift"][:10]]
         else:
@@ -465,19 +482,27 @@ def governance(conn, *, window: str = "24 hours") -> dict:
     out["grants"] = [f"{p} on {s}.{r}" for s, r, p in aidb.role_grants(conn, out["role"])]
     v = verify_cached(conn)
     out["verification"] = {"checked": v["checked"], "drift": v["drift"], "reason": v["reason"]}
-    if st.can_read_telemetry:
-        try:
-            with conn.transaction():
-                dn = aidb.decisions(conn, status="denied", since=window, limit=50)
-                out["denials"] = [{"at": d["recorded_at"].isoformat(), "agent": d["agent"], "principal": d["principal"], "role": d["role"],
-                                   "reason": d["reason"], "decision_id": d["decision_id"], "statement": scrub(str(d["sql"] or ""))[:300]}
-                                  for d in dn]
-                out["allowed"] = conn.execute("SELECT count(*) AS n FROM aidb_otel.traces WHERE decision_status = 'allowed' AND source = 'internal' "
+    # The source is the narrow view `aidb-setup` creates (no SQL text, only this app's agents and purpose). The kit's `aidb.decisions`
+    # reads aidb_otel.traces itself and is used only by a role that was given that access some other way.
+    try:
+        with conn.transaction():
+            if _governance_view_exists(conn):
+                out["source"] = aidb_setup.GOVERNANCE_VIEW
+                rows = conn.execute(f"SELECT recorded_at, decision_id, agent_name, agent_role, interaction_point, denial_reason, denial_class "   # noqa: S608
+                                    f"FROM {aidb_setup.GOVERNANCE_VIEW} WHERE decision_status = 'denied' AND recorded_at > now() - %s::interval "
+                                    "ORDER BY id DESC LIMIT 50", (window,)).fetchall()
+                out["denials"] = [{"at": r["recorded_at"].isoformat(), "agent": r["agent_name"], "role": r["agent_role"], "reason": r["denial_reason"],
+                                   "class": r["denial_class"], "where": r["interaction_point"], "decision_id": r["decision_id"]} for r in rows]
+                out["allowed"] = conn.execute(f"SELECT count(*) AS n FROM {aidb_setup.GOVERNANCE_VIEW} WHERE decision_status = 'allowed' "        # noqa: S608
                                               "AND recorded_at > now() - %s::interval", (window,)).fetchone()["n"]
-        except psycopg.Error as exc:
-            out["denials_error"] = type(exc).__name__
-    else:
-        out["denials_error"] = "this role cannot read aidb_otel.traces"
+            elif st.can_read_telemetry:
+                out["source"] = "apgkit.aidb.decisions"
+                out["denials"] = [{"at": d["recorded_at"].isoformat(), "agent": d["agent"], "role": d["role"], "reason": d["reason"],
+                                   "decision_id": d["decision_id"]} for d in aidb.decisions(conn, status="denied", since=window, limit=50)]
+            else:
+                out["denials_error"] = f"the view {aidb_setup.GOVERNANCE_VIEW} does not exist (an operator runs `pagerlens aidb-setup`)"
+    except psycopg.Error as exc:
+        out["denials_error"] = type(exc).__name__
     return out
 
 
@@ -488,6 +513,15 @@ def status(conn) -> dict:
     rep["verification"] = {"checked": v["checked"], "drift": v["drift"], "reason": v["reason"]}
     rep["requested_backend"] = requested_backend()
     if rep["aidb"]["available"]:
+        if not rep["aidb"].get("can_read_telemetry"):          # the runtime role never reads aidb_otel.traces: count from the narrow view
+            try:
+                with conn.transaction():
+                    if _governance_view_exists(conn):
+                        rep["denials"] = {"window": "24 hours", "source": aidb_setup.GOVERNANCE_VIEW, "count": conn.execute(
+                            f"SELECT count(*) AS n FROM {aidb_setup.GOVERNANCE_VIEW} WHERE decision_status = 'denied' "      # noqa: S608
+                            "AND recorded_at > now() - interval '24 hours'").fetchone()["n"]}
+            except psycopg.Error:
+                pass
         rep["retrieval"] = {k: retriever(k, conn).name for k in KB} if rep["requested_backend"] == "aidb" else {k: "app" for k in KB}
     return rep
 

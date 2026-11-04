@@ -463,7 +463,7 @@ def test_verification_is_skipped_while_the_vault_is_locked_and_counted_when_it_f
         assert res["checked"] is False and "vault is locked" in res["reason"] and res["drift"] == []
         core.vault.initialize(c, PASSWORD)
         c.commit()
-        monkeypatch.setattr(aidb_mode.aidb, "verify", lambda conn, v: [aidb.Drift("agent", "pagerlens_investigator", "modified")])
+        monkeypatch.setattr(aidb_mode.aidb, "verify", lambda conn, v, **kw: [aidb.Drift("agent", "pagerlens_investigator", "modified")])
         before = aidb_mode.rowmac.tampered.labels("aidb_agent")._value.get()
         res = aidb_mode.verify_now(c)
         assert res["checked"] is True and res["drift"] == [{"kind": "agent", "name": "pagerlens_investigator", "problem": "modified"}]
